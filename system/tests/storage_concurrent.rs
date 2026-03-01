@@ -3,11 +3,15 @@
 //! Validates that the POSIX advisory lock (`flock(LOCK_EX)`) on a sibling
 //! `.lock` file correctly serializes concurrent writers and prevents
 //! database corruption.
+//!
+//! Tests G and H specifically cover the pol-3q4b scenario:
+//! `br sync --import-only` racing with `br create` (argus vs agent).
 
 mod common;
 
 use beads_rust::error::BeadsError;
 use beads_rust::storage::{ListFilters, SqliteStorage};
+use beads_rust::sync::{ExportConfig, ImportConfig, export_to_jsonl, import_from_jsonl};
 use common::fixtures;
 use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
@@ -79,8 +83,7 @@ fn flock_serializes_concurrent_mutations() {
             let path = db_path.clone();
             s.spawn(move || {
                 barrier.wait();
-                let mut storage =
-                    SqliteStorage::open_with_timeout(&path, Some(30_000)).unwrap();
+                let mut storage = SqliteStorage::open_with_timeout(&path, Some(30_000)).unwrap();
                 let issue = fixtures::issue(&format!("concurrent-{i}"));
                 storage.create_issue(&issue, "tester").unwrap();
                 // storage dropped here — releases flock
@@ -142,11 +145,7 @@ fn memory_db_has_no_lock_file() {
     let lock_files: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map_or(false, |ext| ext == "lock")
-        })
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "lock"))
         .collect();
     assert!(
         lock_files.is_empty(),
@@ -271,5 +270,210 @@ fn flock_file_exists_while_held_gone_semantically_after_drop() {
         result.is_ok(),
         "Lock should be released after drop, but open failed: {:?}",
         result.err()
+    );
+}
+
+// ============================================================================
+// TEST G — concurrent sync import + create (pol-3q4b: argus vs agent race)
+// ============================================================================
+
+/// Reproduce the argus race: one thread runs `import_from_jsonl` (simulating
+/// `br sync --import-only`) while another thread runs `create_issue`
+/// (simulating `br create`).  Both go through `SqliteStorage`, so the flock
+/// must serialize them.  After both complete, the DB must contain all expected
+/// issues with no corruption.
+#[test]
+fn flock_serializes_sync_import_and_create() {
+    let dir = TempDir::new().unwrap();
+    let beads_dir = dir.path().join(".beads");
+    std::fs::create_dir_all(&beads_dir).unwrap();
+    let db_path = beads_dir.join("beads.db");
+    let jsonl_path = beads_dir.join("issues.jsonl");
+
+    // Seed: create 5 issues and export to JSONL.
+    {
+        let mut storage = SqliteStorage::open(&db_path).unwrap();
+        storage.set_config("issue_prefix", "test").unwrap();
+        for i in 0..5 {
+            let issue = fixtures::issue(&format!("seed-{i}"));
+            storage.create_issue(&issue, "seeder").unwrap();
+        }
+        let export_config = ExportConfig {
+            force: true,
+            beads_dir: Some(beads_dir.clone()),
+            ..Default::default()
+        };
+        export_to_jsonl(&storage, &jsonl_path, &export_config).unwrap();
+    }
+    // flock released — DB seeded, JSONL written.
+
+    // Wipe DB to simulate a fresh clone where only JSONL exists.
+    std::fs::remove_file(&db_path).unwrap();
+    // Also remove the WAL/SHM if any.
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+
+    // Re-create empty DB with schema.
+    {
+        let _storage = SqliteStorage::open(&db_path).unwrap();
+    }
+
+    let barrier = Arc::new(Barrier::new(2));
+
+    std::thread::scope(|s| {
+        // Thread A: import from JSONL (simulates argus `br sync --import-only`).
+        let barrier_a = Arc::clone(&barrier);
+        let db_a = db_path.clone();
+        let jsonl_a = jsonl_path.clone();
+        let beads_a = beads_dir.clone();
+        s.spawn(move || {
+            barrier_a.wait();
+            let mut storage = SqliteStorage::open_with_timeout(&db_a, Some(30_000)).unwrap();
+            storage.set_config("issue_prefix", "test").unwrap();
+            let import_config = ImportConfig {
+                skip_prefix_validation: true,
+                beads_dir: Some(beads_a),
+                show_progress: false,
+                ..Default::default()
+            };
+            import_from_jsonl(&mut storage, &jsonl_a, &import_config, Some("test")).unwrap();
+        });
+
+        // Thread B: create a new issue (simulates agent `br create`).
+        let barrier_b = Arc::clone(&barrier);
+        let db_b = db_path.clone();
+        s.spawn(move || {
+            barrier_b.wait();
+            let mut storage = SqliteStorage::open_with_timeout(&db_b, Some(30_000)).unwrap();
+            let issue = fixtures::issue("concurrent-agent-create");
+            storage.create_issue(&issue, "agent").unwrap();
+        });
+    });
+
+    // Verify: 5 imported + 1 created = 6 total, no corruption.
+    let storage = SqliteStorage::open(&db_path).unwrap();
+    let filters = ListFilters {
+        include_closed: true,
+        include_templates: true,
+        ..Default::default()
+    };
+    let all = storage.list_issues(&filters).unwrap();
+    assert!(
+        all.len() >= 6,
+        "Expected at least 6 issues (5 imported + 1 created), found {}",
+        all.len()
+    );
+
+    // Verify the agent-created issue exists.
+    let agent_issue = all.iter().find(|i| i.title == "concurrent-agent-create");
+    assert!(
+        agent_issue.is_some(),
+        "Agent-created issue must survive concurrent import"
+    );
+
+    // Verify imported issues exist.
+    for i in 0..5 {
+        let title = format!("seed-{i}");
+        let found = all.iter().any(|issue| issue.title == title);
+        assert!(
+            found,
+            "Imported issue '{title}' must exist after concurrent import+create"
+        );
+    }
+}
+
+// ============================================================================
+// TEST H — repeated concurrent import cycles (stress test)
+// ============================================================================
+
+/// Stress test: N threads each open storage, import from JSONL, and create
+/// one new issue.  Simulates multiple argus cycles overlapping with agent
+/// work.  The flock must serialize all access; final DB must be consistent.
+#[test]
+fn flock_serializes_repeated_import_and_create_cycles() {
+    let dir = TempDir::new().unwrap();
+    let beads_dir = dir.path().join(".beads");
+    std::fs::create_dir_all(&beads_dir).unwrap();
+    let db_path = beads_dir.join("beads.db");
+    let jsonl_path = beads_dir.join("issues.jsonl");
+
+    // Seed: create 3 issues and export to JSONL.
+    {
+        let mut storage = SqliteStorage::open(&db_path).unwrap();
+        storage.set_config("issue_prefix", "test").unwrap();
+        for i in 0..3 {
+            let issue = fixtures::issue(&format!("base-{i}"));
+            storage.create_issue(&issue, "seeder").unwrap();
+        }
+        let export_config = ExportConfig {
+            force: true,
+            beads_dir: Some(beads_dir.clone()),
+            ..Default::default()
+        };
+        export_to_jsonl(&storage, &jsonl_path, &export_config).unwrap();
+    }
+
+    const N: usize = 6;
+    let barrier = Arc::new(Barrier::new(N));
+
+    std::thread::scope(|s| {
+        for i in 0..N {
+            let barrier = Arc::clone(&barrier);
+            let db = db_path.clone();
+            let jsonl = jsonl_path.clone();
+            let beads = beads_dir.clone();
+            s.spawn(move || {
+                barrier.wait();
+                let mut storage = SqliteStorage::open_with_timeout(&db, Some(30_000)).unwrap();
+
+                // Half the threads import (argus pattern), half create (agent pattern).
+                if i % 2 == 0 {
+                    let import_config = ImportConfig {
+                        skip_prefix_validation: true,
+                        beads_dir: Some(beads),
+                        show_progress: false,
+                        ..Default::default()
+                    };
+                    import_from_jsonl(&mut storage, &jsonl, &import_config, Some("test")).unwrap();
+                } else {
+                    let issue = fixtures::issue(&format!("stress-{i}"));
+                    storage.create_issue(&issue, "stress-agent").unwrap();
+                }
+            });
+        }
+    });
+
+    // Verify: 3 base + 3 created (threads 1, 3, 5) = 6 minimum.
+    let storage = SqliteStorage::open(&db_path).unwrap();
+    let filters = ListFilters {
+        include_closed: true,
+        include_templates: true,
+        ..Default::default()
+    };
+    let all = storage.list_issues(&filters).unwrap();
+
+    // Base issues must survive all the concurrent imports.
+    for i in 0..3 {
+        let title = format!("base-{i}");
+        assert!(
+            all.iter().any(|issue| issue.title == title),
+            "Base issue '{title}' must survive concurrent stress"
+        );
+    }
+
+    // Each odd-numbered thread created an issue.
+    for i in (1..N).step_by(2) {
+        let title = format!("stress-{i}");
+        assert!(
+            all.iter().any(|issue| issue.title == title),
+            "Stress-created issue '{title}' must survive concurrent import"
+        );
+    }
+
+    let expected_min = 3 + (N / 2); // 3 base + 3 creates
+    assert!(
+        all.len() >= expected_min,
+        "Expected at least {expected_min} issues, found {}",
+        all.len()
     );
 }
