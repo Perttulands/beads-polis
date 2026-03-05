@@ -83,7 +83,7 @@ fn concurrent_exports_no_corruption() {
     let beads_dir = setup_beads_dir(&temp);
 
     // Export all concurrently using threads - create storage inside each thread
-    // since fsqlite Connection is not Send (uses Rc internally)
+    // since rusqlite Connection is not Send+Sync by default
     let handles: Vec<_> = (0..4)
         .map(|i| {
             let path = beads_dir.join(format!("issues_{i}.jsonl"));

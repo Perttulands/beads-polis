@@ -1,7 +1,6 @@
 //! Database schema definitions and migration logic.
 
-use fsqlite::Connection;
-use fsqlite_types::SqliteValue;
+use rusqlite::Connection;
 
 use crate::error::Result;
 
@@ -198,15 +197,9 @@ pub const SCHEMA_SQL: &str = r"
 
 /// Execute multiple SQL statements separated by semicolons.
 ///
-/// fsqlite does not support `execute_batch`, so we split on `;` and
-/// execute each non-empty statement individually.
+/// Rusqlite natively supports `execute_batch`, so we delegate directly.
 pub(crate) fn execute_batch(conn: &Connection, sql: &str) -> Result<()> {
-    for stmt in sql.split(';') {
-        let trimmed = stmt.trim();
-        if !trimmed.is_empty() {
-            conn.execute(trimmed)?;
-        }
-    }
+    conn.execute_batch(sql)?;
     Ok(())
 }
 
@@ -230,30 +223,31 @@ pub fn apply_schema(conn: &Connection) -> Result<()> {
     run_migrations(conn)?;
 
     // Set journal mode to WAL for concurrency
-    conn.execute("PRAGMA journal_mode = WAL")?;
+    conn.execute_batch("PRAGMA journal_mode = WAL")?;
 
     // Enable foreign keys
-    conn.execute("PRAGMA foreign_keys = ON")?;
+    conn.execute_batch("PRAGMA foreign_keys = ON")?;
 
     // Performance PRAGMAs (safe with WAL mode)
     // NORMAL synchronous is safe with WAL: committed data survives OS crash
-    conn.execute("PRAGMA synchronous = NORMAL")?;
+    conn.execute_batch("PRAGMA synchronous = NORMAL")?;
     // Use memory for temp tables/indexes instead of disk
-    conn.execute("PRAGMA temp_store = MEMORY")?;
+    conn.execute_batch("PRAGMA temp_store = MEMORY")?;
     // 8MB page cache (default is ~2MB), improves read-heavy workloads
-    conn.execute("PRAGMA cache_size = -8000")?;
+    conn.execute_batch("PRAGMA cache_size = -8000")?;
     // Mark schema as applied so future opens can skip DDL/migration work.
-    conn.execute(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))?;
+    conn.execute_batch(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))?;
 
     Ok(())
 }
 
 fn table_exists(conn: &Connection, table: &str) -> bool {
-    conn.query_with_params(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        &[SqliteValue::from(table)],
-    )
-    .is_ok_and(|rows| !rows.is_empty())
+    conn.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![table], |_row| Ok(()))
+                .map(|rows| rows.count() > 0)
+        })
+        .unwrap_or(false)
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
@@ -261,8 +255,12 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     // Note: pragma_table_info() requires the table name directly (can't be parameterized),
     // but we validate it's a known table name before calling this function.
     let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?");
-    conn.query_with_params(&sql, &[SqliteValue::from(column)])
-        .is_ok_and(|rows| !rows.is_empty())
+    conn.prepare(&sql)
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![column], |_row| Ok(()))
+                .map(|rows| rows.count() > 0)
+        })
+        .unwrap_or(false)
 }
 
 const ISSUE_COLUMNS: &[(&str, &str)] = &[
@@ -333,7 +331,7 @@ fn ensure_columns(conn: &Connection, table: &str, columns: &[(&str, &str)]) -> R
     for (name, definition) in columns {
         if !column_exists(conn, table, name) {
             let sql = format!("ALTER TABLE {table} ADD COLUMN {name} {definition}");
-            conn.execute(&sql)?;
+            conn.execute(&sql, [])?;
         }
     }
 
@@ -353,7 +351,7 @@ fn run_pre_schema_migrations(conn: &Connection) -> Result<()> {
         let has_issue_id = column_exists(conn, "blocked_issues_cache", "issue_id");
 
         if !has_blocked_at || !has_blocked_by || !has_issue_id {
-            conn.execute("DROP TABLE IF EXISTS blocked_issues_cache")?;
+            conn.execute("DROP TABLE IF EXISTS blocked_issues_cache", [])?;
         }
     }
 
@@ -366,7 +364,7 @@ fn run_pre_schema_migrations(conn: &Connection) -> Result<()> {
     // Always drop idx_issues_ready so SCHEMA_SQL recreates it with the
     // current definition (including is_template filter). DROP INDEX is O(1)
     // and SCHEMA_SQL's CREATE INDEX is fast for typical issue counts.
-    conn.execute("DROP INDEX IF EXISTS idx_issues_ready")?;
+    conn.execute("DROP INDEX IF EXISTS idx_issues_ready", [])?;
 
     Ok(())
 }
@@ -379,20 +377,32 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     // Migration: Ensure blocked_issues_cache has correct schema (blocked_by, blocked_at)
     // Check for old column name (blocked_by_json) or missing columns
     let has_blocked_by: bool = conn
-        .query("SELECT 1 FROM pragma_table_info('blocked_issues_cache') WHERE name='blocked_by'")
-        .is_ok_and(|rows| !rows.is_empty());
+        .prepare("SELECT 1 FROM pragma_table_info('blocked_issues_cache') WHERE name='blocked_by'")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |_row| Ok(()))
+                .map(|rows| rows.count() > 0)
+        })
+        .unwrap_or(false);
 
     let has_blocked_at: bool = conn
-        .query("SELECT 1 FROM pragma_table_info('blocked_issues_cache') WHERE name='blocked_at'")
-        .is_ok_and(|rows| !rows.is_empty());
+        .prepare("SELECT 1 FROM pragma_table_info('blocked_issues_cache') WHERE name='blocked_at'")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |_row| Ok(()))
+                .map(|rows| rows.count() > 0)
+        })
+        .unwrap_or(false);
 
     let has_issue_id: bool = conn
-        .query("SELECT 1 FROM pragma_table_info('blocked_issues_cache') WHERE name='issue_id'")
-        .is_ok_and(|rows| !rows.is_empty());
+        .prepare("SELECT 1 FROM pragma_table_info('blocked_issues_cache') WHERE name='issue_id'")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |_row| Ok(()))
+                .map(|rows| rows.count() > 0)
+        })
+        .unwrap_or(false);
 
     if !has_blocked_by || !has_blocked_at || !has_issue_id {
         // Table needs update - drop and recreate (it's a cache, data is regenerated)
-        conn.execute("DROP TABLE IF EXISTS blocked_issues_cache")?;
+        conn.execute("DROP TABLE IF EXISTS blocked_issues_cache", [])?;
         conn.execute(
             "CREATE TABLE blocked_issues_cache (
                 issue_id TEXT PRIMARY KEY,
@@ -400,33 +410,52 @@ fn run_migrations(conn: &Connection) -> Result<()> {
                 blocked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
             )",
+            [],
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_blocked_cache_blocked_at ON blocked_issues_cache(blocked_at)",
+            [],
         )?;
     }
 
     // Migration: ensure compaction_level is never NULL (bd compatibility)
     let has_compaction_level: bool = conn
-        .query("SELECT 1 FROM pragma_table_info('issues') WHERE name='compaction_level'")
-        .is_ok_and(|rows| !rows.is_empty());
+        .prepare("SELECT 1 FROM pragma_table_info('issues') WHERE name='compaction_level'")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |_row| Ok(()))
+                .map(|rows| rows.count() > 0)
+        })
+        .unwrap_or(false);
 
     if has_compaction_level {
-        conn.execute("UPDATE issues SET compaction_level = 0 WHERE compaction_level IS NULL")?;
+        conn.execute(
+            "UPDATE issues SET compaction_level = 0 WHERE compaction_level IS NULL",
+            [],
+        )?;
     }
 
     // Migration: ensure source_repo column exists (bd compatibility)
     let has_source_repo: bool = conn
-        .query("SELECT 1 FROM pragma_table_info('issues') WHERE name='source_repo'")
-        .is_ok_and(|rows| !rows.is_empty());
+        .prepare("SELECT 1 FROM pragma_table_info('issues') WHERE name='source_repo'")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |_row| Ok(()))
+                .map(|rows| rows.count() > 0)
+        })
+        .unwrap_or(false);
 
     if !has_source_repo {
-        conn.execute("ALTER TABLE issues ADD COLUMN source_repo TEXT NOT NULL DEFAULT '.'")?;
+        conn.execute(
+            "ALTER TABLE issues ADD COLUMN source_repo TEXT NOT NULL DEFAULT '.'",
+            [],
+        )?;
     }
 
     // Migration: ensure is_template column exists (needed for idx_issues_ready)
     if !column_exists(conn, "issues", "is_template") {
-        conn.execute("ALTER TABLE issues ADD COLUMN is_template INTEGER DEFAULT 0")?;
+        conn.execute(
+            "ALTER TABLE issues ADD COLUMN is_template INTEGER DEFAULT 0",
+            [],
+        )?;
     }
 
     // Migration: Add missing indexes for bd parity
@@ -487,6 +516,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         if column_exists(conn, "dependencies", "thread_id") {
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_dependencies_thread ON dependencies(thread_id) WHERE thread_id != ''",
+                [],
             )?;
         }
     }
@@ -502,7 +532,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     }
 
     if table_exists(conn, "comments") {
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id)")?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id)",
+            [],
+        )?;
     }
 
     if table_exists(conn, "events") {
@@ -522,20 +555,21 @@ fn run_migrations(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fsqlite::Connection;
+    use rusqlite::Connection;
     use std::collections::HashSet;
 
     #[test]
     fn test_apply_schema() {
-        let conn = Connection::open(":memory:").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
         apply_schema(&conn).expect("Failed to apply schema");
 
         // Verify a few tables exist
         let tables: Vec<String> = conn
-            .query("SELECT name FROM sqlite_master WHERE type='table'")
+            .prepare("SELECT name FROM sqlite_master WHERE type='table'")
             .unwrap()
-            .iter()
-            .filter_map(|row| row.get(0).and_then(|v| v.as_text()).map(String::from))
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
             .collect();
 
         assert!(tables.contains(&"issues".to_string()));
@@ -544,17 +578,27 @@ mod tests {
         assert!(tables.contains(&"dirty_issues".to_string()));
 
         // Verify pragmas
-        let row = conn.query_row("PRAGMA journal_mode").unwrap();
-        let journal_mode = row
-            .get(0)
-            .and_then(|v| v.as_text())
-            .unwrap_or("")
-            .to_string();
+        let journal_mode: String = conn
+            .prepare("PRAGMA journal_mode")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .next()
+            .unwrap_or_default();
         // In-memory DBs use MEMORY journaling, regardless of what we set
-        assert!(journal_mode.to_uppercase() == "WAL" || journal_mode.to_uppercase() == "MEMORY");
+        assert!(
+            journal_mode.to_uppercase() == "WAL" || journal_mode.to_uppercase() == "MEMORY"
+        );
 
-        let row = conn.query_row("PRAGMA foreign_keys").unwrap();
-        let foreign_keys = row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0);
+        let foreign_keys: i64 = conn
+            .prepare("PRAGMA foreign_keys")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .next()
+            .unwrap_or(0);
         assert_eq!(foreign_keys, 1);
     }
 
@@ -563,32 +607,25 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn test_schema_parity_conformance() {
-        let conn = Connection::open(":memory:").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
         apply_schema(&conn).expect("Failed to apply schema");
 
         // === ISSUES TABLE ===
         // Verify column defaults
+        // PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk
         let issues_cols: Vec<(String, String, i32, Option<String>)> = conn
-            .query("PRAGMA table_info(issues)")
+            .prepare("PRAGMA table_info(issues)")
             .unwrap()
-            .iter()
-            .map(|row| {
-                (
-                    row.get(1)
-                        .and_then(|v| v.as_text())
-                        .unwrap_or("")
-                        .to_string(),
-                    row.get(2)
-                        .and_then(|v| v.as_text())
-                        .unwrap_or("")
-                        .to_string(),
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        row.get(3).and_then(SqliteValue::as_integer).unwrap_or(0) as i32
-                    },
-                    row.get(4).and_then(|v| v.as_text()).map(String::from),
-                )
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2).unwrap_or_default(),
+                    row.get::<_, i32>(3).unwrap_or(0),
+                    row.get::<_, Option<String>>(4)?,
+                ))
             })
+            .unwrap()
+            .filter_map(|r| r.ok())
             .collect();
 
         // Check required defaults for bd parity
@@ -634,10 +671,11 @@ mod tests {
 
         // === VERIFY KEY INDEXES EXIST ===
         let indexes: HashSet<String> = conn
-            .query("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL")
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL")
             .unwrap()
-            .iter()
-            .filter_map(|row| row.get(0).and_then(|v| v.as_text()).map(String::from))
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
             .collect();
 
         // Core indexes
@@ -705,18 +743,16 @@ mod tests {
 
         // === DEPENDENCIES TABLE ===
         let deps_cols: Vec<(String, Option<String>)> = conn
-            .query("PRAGMA table_info(dependencies)")
+            .prepare("PRAGMA table_info(dependencies)")
             .unwrap()
-            .iter()
-            .map(|row| {
-                (
-                    row.get(1)
-                        .and_then(|v| v.as_text())
-                        .unwrap_or("")
-                        .to_string(),
-                    row.get(4).and_then(|v| v.as_text()).map(String::from),
-                )
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
             })
+            .unwrap()
+            .filter_map(|r| r.ok())
             .collect();
 
         let deps_map: std::collections::HashMap<_, _> = deps_cols
@@ -776,10 +812,11 @@ mod tests {
 
         // === BLOCKED_ISSUES_CACHE TABLE ===
         let cache_cols: Vec<String> = conn
-            .query("PRAGMA table_info(blocked_issues_cache)")
+            .prepare("PRAGMA table_info(blocked_issues_cache)")
             .unwrap()
-            .iter()
-            .filter_map(|row| row.get(1).and_then(|v| v.as_text()).map(String::from))
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
             .collect();
 
         assert!(
@@ -809,30 +846,32 @@ mod tests {
 
         // === TEST CLOSED-AT CONSTRAINT ===
         // Insert an issue with defaults (will get status='open', closed_at=NULL)
-        conn.execute("INSERT INTO issues (id, title) VALUES ('test-1', 'Test Issue')")
+        conn.execute("INSERT INTO issues (id, title) VALUES ('test-1', 'Test Issue')", [])
             .expect("Should allow open issue without closed_at");
 
         // Try to insert closed issue without closed_at — CHECK constraint
-        // should reject it. fsqlite does not yet enforce CHECK constraints,
-        // so we accept either outcome.
+        // should reject it. We accept either outcome for robustness.
         let result = conn.execute(
             "INSERT INTO issues (id, title, status) VALUES ('test-2', 'Closed', 'closed')",
+            [],
         );
         if result.is_ok() {
-            // fsqlite: CHECK not enforced — clean up the row so later assertions
+            // CHECK not enforced — clean up the row so later assertions
             // are not affected by the extra row.
-            let _ = conn.execute("DELETE FROM issues WHERE id = 'test-2'");
+            let _ = conn.execute("DELETE FROM issues WHERE id = 'test-2'", []);
         }
 
         // Insert closed issue with closed_at - should succeed
         conn.execute(
             "INSERT INTO issues (id, title, status, closed_at) VALUES ('test-3', 'Closed', 'closed', CURRENT_TIMESTAMP)",
+            [],
         )
         .expect("Should allow closed issue with closed_at");
 
         // Insert tombstone without closed_at - should succeed (tombstones exempt)
         conn.execute(
             "INSERT INTO issues (id, title, status) VALUES ('test-4', 'Tombstone', 'tombstone')",
+            [],
         )
         .expect("Should allow tombstone without closed_at");
     }
@@ -840,7 +879,7 @@ mod tests {
     /// Test that migrations correctly upgrade old schemas.
     #[test]
     fn test_migration_blocked_cache_upgrade() {
-        let conn = Connection::open(":memory:").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
 
         // Create old-style blocked_issues_cache with blocked_by_json
         // Using a complete issues table schema so index migrations succeed
@@ -889,10 +928,11 @@ mod tests {
 
         // Verify columns were updated
         let cols: Vec<String> = conn
-            .query("PRAGMA table_info(blocked_issues_cache)")
+            .prepare("PRAGMA table_info(blocked_issues_cache)")
             .unwrap()
-            .iter()
-            .filter_map(|row| row.get(1).and_then(|v| v.as_text()).map(String::from))
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
             .collect();
 
         assert!(
@@ -912,7 +952,7 @@ mod tests {
     /// Migration: drop old blocked_issues_cache missing issue_id column.
     #[test]
     fn test_migration_blocked_cache_missing_issue_id() {
-        let conn = Connection::open(":memory:").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
 
         // Old-style cache table with 'id' column instead of 'issue_id'
         // Using a complete issues table schema so index migrations succeed
@@ -975,10 +1015,11 @@ mod tests {
         apply_schema(&conn).unwrap();
 
         let cols: Vec<String> = conn
-            .query("PRAGMA table_info(blocked_issues_cache)")
+            .prepare("PRAGMA table_info(blocked_issues_cache)")
             .unwrap()
-            .iter()
-            .filter_map(|row| row.get(1).and_then(|v| v.as_text()).map(String::from))
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
             .collect();
 
         assert!(
@@ -1002,7 +1043,7 @@ mod tests {
     /// Migration: add missing issue columns for older schemas.
     #[test]
     fn test_migration_adds_missing_issue_columns() {
-        let conn = Connection::open(":memory:").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
 
         execute_batch(
             &conn,
@@ -1018,10 +1059,11 @@ mod tests {
         apply_schema(&conn).unwrap();
 
         let cols: Vec<String> = conn
-            .query("PRAGMA table_info('issues')")
+            .prepare("PRAGMA table_info('issues')")
             .unwrap()
-            .iter()
-            .filter_map(|row| row.get(1).and_then(|v| v.as_text()).map(String::from))
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
             .collect();
 
         let required = [
@@ -1049,7 +1091,7 @@ mod tests {
     /// Migration: add missing dependency type column for older schemas.
     #[test]
     fn test_migration_adds_missing_dependency_type() {
-        let conn = Connection::open(":memory:").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
 
         execute_batch(
             &conn,
@@ -1070,10 +1112,11 @@ mod tests {
         apply_schema(&conn).unwrap();
 
         assert!(
-            conn.query("PRAGMA table_info('dependencies')")
+            conn.prepare("PRAGMA table_info('dependencies')")
                 .unwrap()
-                .iter()
-                .filter_map(|row| row.get(1).and_then(|v| v.as_text()).map(String::from))
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .filter_map(|r| r.ok())
                 .any(|col| col == "type"),
             "missing dependency type column"
         );

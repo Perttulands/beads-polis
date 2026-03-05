@@ -8,8 +8,7 @@
 //! Events are local DB only - never exported to JSONL.
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
-use fsqlite::{Connection, Row};
-use fsqlite_types::SqliteValue;
+use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::model::{Event, EventType};
@@ -65,24 +64,23 @@ pub fn insert_event(
     comment: Option<&str>,
 ) -> Result<i64> {
     let now = Utc::now();
-    conn.execute_with_params(
+    conn.execute(
         r"
         INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         ",
-        &[
-            SqliteValue::from(issue_id),
-            SqliteValue::from(event_type.as_str()),
-            SqliteValue::from(actor),
-            old_value.map_or(SqliteValue::Null, SqliteValue::from),
-            new_value.map_or(SqliteValue::Null, SqliteValue::from),
-            comment.map_or(SqliteValue::Null, SqliteValue::from),
-            SqliteValue::from(now.to_rfc3339()),
+        rusqlite::params![
+            issue_id,
+            event_type.as_str(),
+            actor,
+            old_value,
+            new_value,
+            comment,
+            now.to_rfc3339()
         ],
     )?;
 
-    let row = conn.query_row("SELECT last_insert_rowid()")?;
-    let id = row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0);
+    let id = conn.query_row("SELECT last_insert_rowid()", [], |row| row.get::<_, i64>(0))?;
     Ok(id)
 }
 
@@ -356,8 +354,8 @@ pub fn insert_restored_event(
 ///
 /// Returns an error if the database query fails.
 pub fn get_events(conn: &Connection, issue_id: &str, limit: usize) -> Result<Vec<Event>> {
-    let events = if limit > 0 {
-        conn.query_with_params(
+    if limit > 0 {
+        let mut stmt = conn.prepare(
             r"
             SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
             FROM events
@@ -365,47 +363,55 @@ pub fn get_events(conn: &Connection, issue_id: &str, limit: usize) -> Result<Vec
             ORDER BY created_at DESC, id DESC
             LIMIT ?2
             ",
-            #[allow(clippy::cast_possible_wrap)]
-            &[SqliteValue::from(issue_id), SqliteValue::from(limit as i64)],
-        )?
+        )?;
+        #[allow(clippy::cast_possible_wrap)]
+        let rows = stmt.query_map(rusqlite::params![issue_id, limit as i64], |row| {
+            Ok(event_from_row(row))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     } else {
-        conn.query_with_params(
+        let mut stmt = conn.prepare(
             r"
             SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
             FROM events
             WHERE issue_id = ?1
             ORDER BY created_at DESC, id DESC
             ",
-            &[SqliteValue::from(issue_id)],
-        )?
-    };
-
-    Ok(events.iter().map(event_from_row).collect())
+        )?;
+        let rows = stmt.query_map(rusqlite::params![issue_id], |row| {
+            Ok(event_from_row(row))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }
 
-fn event_from_row(row: &Row) -> Event {
-    let id = row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0);
+fn event_from_row(row: &rusqlite::Row<'_>) -> Event {
+    let id = row.get::<_, Option<i64>>(0).unwrap_or(None).unwrap_or(0);
     let issue_id = row
-        .get(1)
-        .and_then(|v| v.as_text())
-        .unwrap_or("")
-        .to_string();
-    let event_type_str = row.get(2).and_then(|v| v.as_text()).unwrap_or("");
+        .get::<_, Option<String>>(1)
+        .unwrap_or(None)
+        .unwrap_or_default();
+    let event_type_str = row
+        .get::<_, Option<String>>(2)
+        .unwrap_or(None)
+        .unwrap_or_default();
     let actor = row
-        .get(3)
-        .and_then(|v| v.as_text())
-        .unwrap_or("")
-        .to_string();
-    let old_value = row.get(4).and_then(|v| v.as_text()).map(String::from);
-    let new_value = row.get(5).and_then(|v| v.as_text()).map(String::from);
-    let comment = row.get(6).and_then(|v| v.as_text()).map(String::from);
-    let created_at_str = row.get(7).and_then(|v| v.as_text()).unwrap_or("");
+        .get::<_, Option<String>>(3)
+        .unwrap_or(None)
+        .unwrap_or_default();
+    let old_value = row.get::<_, Option<String>>(4).unwrap_or(None);
+    let new_value = row.get::<_, Option<String>>(5).unwrap_or(None);
+    let comment = row.get::<_, Option<String>>(6).unwrap_or(None);
+    let created_at_str = row
+        .get::<_, Option<String>>(7)
+        .unwrap_or(None)
+        .unwrap_or_default();
 
     // Parse event type
-    let event_type = parse_event_type(event_type_str);
+    let event_type = parse_event_type(&event_type_str);
 
     // Parse timestamp (support RFC3339 and SQLite default format)
-    let created_at = parse_event_timestamp(created_at_str);
+    let created_at = parse_event_timestamp(&created_at_str);
 
     Event {
         id,
@@ -439,28 +445,31 @@ fn parse_event_timestamp(value: &str) -> DateTime<Utc> {
 ///
 /// Returns an error if the database query fails.
 pub fn get_all_events(conn: &Connection, limit: usize) -> Result<Vec<Event>> {
-    let rows = if limit > 0 {
-        conn.query_with_params(
+    if limit > 0 {
+        let mut stmt = conn.prepare(
             r"
             SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
             FROM events
             ORDER BY created_at DESC, id DESC
             LIMIT ?1
             ",
-            #[allow(clippy::cast_possible_wrap)]
-            &[SqliteValue::from(limit as i64)],
-        )?
+        )?;
+        #[allow(clippy::cast_possible_wrap)]
+        let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+            Ok(event_from_row(row))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     } else {
-        conn.query(
+        let mut stmt = conn.prepare(
             r"
             SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
             FROM events
             ORDER BY created_at DESC, id DESC
             ",
-        )?
-    };
-
-    Ok(rows.iter().map(event_from_row).collect())
+        )?;
+        let rows = stmt.query_map([], |row| Ok(event_from_row(row)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }
 
 /// Get event count for an issue.
@@ -469,11 +478,11 @@ pub fn get_all_events(conn: &Connection, limit: usize) -> Result<Vec<Event>> {
 ///
 /// Returns an error if the database query fails.
 pub fn count_events(conn: &Connection, issue_id: &str) -> Result<i64> {
-    let row = conn.query_row_with_params(
+    let count = conn.query_row(
         "SELECT COUNT(*) FROM events WHERE issue_id = ?1",
-        &[SqliteValue::from(issue_id)],
+        rusqlite::params![issue_id],
+        |row| row.get::<_, i64>(0),
     )?;
-    let count = row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0);
     Ok(count)
 }
 
@@ -513,10 +522,10 @@ pub fn init_events_table(conn: &Connection) -> Result<()> {
 mod tests {
     use super::*;
     use crate::storage::schema::execute_batch;
-    use fsqlite::Connection;
+    use rusqlite::Connection;
 
     fn setup_test_db() -> Connection {
-        let conn = Connection::open(":memory:").expect("Failed to create in-memory database");
+        let conn = Connection::open_in_memory().expect("Failed to create in-memory database");
 
         // Create minimal issues table for foreign key
         execute_batch(
@@ -535,8 +544,11 @@ mod tests {
         init_events_table(&conn).expect("Failed to create events table");
 
         // Insert a test issue
-        conn.execute("INSERT INTO issues (id, title) VALUES ('test-001', 'Test Issue')")
-            .expect("Failed to insert test issue");
+        conn.execute(
+            "INSERT INTO issues (id, title) VALUES ('test-001', 'Test Issue')",
+            [],
+        )
+        .expect("Failed to insert test issue");
 
         conn
     }
@@ -544,10 +556,10 @@ mod tests {
     #[test]
     fn test_insert_created_event() {
         let conn = setup_test_db();
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
 
         let id = insert_created_event(&conn, "test-001", "alice").expect("Failed to insert event");
-        conn.execute("COMMIT").expect("Failed to commit");
+        conn.execute("COMMIT", []).expect("Failed to commit");
 
         assert!(id > 0);
 
@@ -560,11 +572,11 @@ mod tests {
     #[test]
     fn test_insert_status_changed_event() {
         let conn = setup_test_db();
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
 
         insert_status_changed_event(&conn, "test-001", "bob", "open", "in_progress")
             .expect("Failed to insert event");
-        conn.execute("COMMIT").expect("Failed to commit");
+        conn.execute("COMMIT", []).expect("Failed to commit");
 
         let events = get_events(&conn, "test-001", 0).expect("Failed to get events");
         assert_eq!(events.len(), 1);
@@ -576,11 +588,11 @@ mod tests {
     #[test]
     fn test_insert_closed_event() {
         let conn = setup_test_db();
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
 
         insert_closed_event(&conn, "test-001", "carol", Some("Completed the work"))
             .expect("Failed to insert event");
-        conn.execute("COMMIT").expect("Failed to commit");
+        conn.execute("COMMIT", []).expect("Failed to commit");
 
         let events = get_events(&conn, "test-001", 0).expect("Failed to get events");
         assert_eq!(events.len(), 1);
@@ -591,11 +603,11 @@ mod tests {
     #[test]
     fn test_insert_commented_event() {
         let conn = setup_test_db();
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
 
         insert_commented_event(&conn, "test-001", "dave", "This is a comment")
             .expect("Failed to insert event");
-        conn.execute("COMMIT").expect("Failed to commit");
+        conn.execute("COMMIT", []).expect("Failed to commit");
 
         let events = get_events(&conn, "test-001", 0).expect("Failed to get events");
         assert_eq!(events.len(), 1);
@@ -608,13 +620,16 @@ mod tests {
         let conn = setup_test_db();
 
         // Add second issue for dependency
-        conn.execute("INSERT INTO issues (id, title) VALUES ('test-002', 'Blocking Issue')")
-            .expect("Failed to insert second issue");
+        conn.execute(
+            "INSERT INTO issues (id, title) VALUES ('test-002', 'Blocking Issue')",
+            [],
+        )
+        .expect("Failed to insert second issue");
 
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
         insert_dependency_added_event(&conn, "test-001", "eve", "blocks", "test-002")
             .expect("Failed to insert event");
-        conn.execute("COMMIT").expect("Failed to commit");
+        conn.execute("COMMIT", []).expect("Failed to commit");
 
         let events = get_events(&conn, "test-001", 0).expect("Failed to get events");
         assert_eq!(events.len(), 1);
@@ -626,13 +641,13 @@ mod tests {
     #[test]
     fn test_insert_label_events() {
         let conn = setup_test_db();
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
 
         insert_label_added_event(&conn, "test-001", "frank", "urgent")
             .expect("Failed to insert label added event");
         insert_label_removed_event(&conn, "test-001", "frank", "urgent")
             .expect("Failed to insert label removed event");
-        conn.execute("COMMIT").expect("Failed to commit");
+        conn.execute("COMMIT", []).expect("Failed to commit");
 
         let events = get_events(&conn, "test-001", 0).expect("Failed to get events");
         assert_eq!(events.len(), 2);
@@ -651,10 +666,10 @@ mod tests {
 
         // Insert multiple events
         for i in 0..5 {
-            conn.execute("BEGIN").expect("Failed to start tx");
+            conn.execute("BEGIN", []).expect("Failed to start tx");
             insert_commented_event(&conn, "test-001", "user", &format!("Comment {i}"))
                 .expect("Failed to insert event");
-            conn.execute("COMMIT").expect("Failed to commit");
+            conn.execute("COMMIT", []).expect("Failed to commit");
         }
 
         let events = get_events(&conn, "test-001", 0).expect("Failed to get events");
@@ -671,10 +686,10 @@ mod tests {
 
         // Insert 10 events
         for i in 0..10 {
-            conn.execute("BEGIN").expect("Failed to start tx");
+            conn.execute("BEGIN", []).expect("Failed to start tx");
             insert_commented_event(&conn, "test-001", "user", &format!("Comment {i}"))
                 .expect("Failed to insert event");
-            conn.execute("COMMIT").expect("Failed to commit");
+            conn.execute("COMMIT", []).expect("Failed to commit");
         }
 
         // Get only 3 events
@@ -692,10 +707,10 @@ mod tests {
 
         // Insert events
         for _ in 0..5 {
-            conn.execute("BEGIN").expect("Failed to start tx");
+            conn.execute("BEGIN", []).expect("Failed to start tx");
             insert_commented_event(&conn, "test-001", "user", "A comment")
                 .expect("Failed to insert event");
-            conn.execute("COMMIT").expect("Failed to commit");
+            conn.execute("COMMIT", []).expect("Failed to commit");
         }
 
         let count = count_events(&conn, "test-001").expect("Failed to count events");
@@ -705,13 +720,13 @@ mod tests {
     #[test]
     fn test_deleted_and_restored_events() {
         let conn = setup_test_db();
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
 
         insert_deleted_event(&conn, "test-001", "admin", Some("Duplicate issue"))
             .expect("Failed to insert deleted event");
         insert_restored_event(&conn, "test-001", "admin", Some("Not a duplicate"))
             .expect("Failed to insert restored event");
-        conn.execute("COMMIT").expect("Failed to commit");
+        conn.execute("COMMIT", []).expect("Failed to commit");
 
         let events = get_events(&conn, "test-001", 0).expect("Failed to get events");
         assert_eq!(events.len(), 2);
@@ -727,11 +742,11 @@ mod tests {
     #[test]
     fn test_reopened_event() {
         let conn = setup_test_db();
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
 
         insert_reopened_event(&conn, "test-001", "manager", Some("Need more work"))
             .expect("Failed to insert reopened event");
-        conn.execute("COMMIT").expect("Failed to commit");
+        conn.execute("COMMIT", []).expect("Failed to commit");
 
         let events = get_events(&conn, "test-001", 0).expect("Failed to get events");
         assert_eq!(events.len(), 1);
@@ -744,14 +759,17 @@ mod tests {
         let conn = setup_test_db();
 
         // Add second issue
-        conn.execute("INSERT INTO issues (id, title) VALUES ('test-002', 'Second Issue')")
-            .expect("Failed to insert second issue");
+        conn.execute(
+            "INSERT INTO issues (id, title) VALUES ('test-002', 'Second Issue')",
+            [],
+        )
+        .expect("Failed to insert second issue");
 
         // Insert events for both issues
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
         insert_created_event(&conn, "test-001", "alice").expect("Failed to insert event");
         insert_created_event(&conn, "test-002", "bob").expect("Failed to insert event");
-        conn.execute("COMMIT").expect("Failed to commit");
+        conn.execute("COMMIT", []).expect("Failed to commit");
 
         let all_events = get_all_events(&conn, 0).expect("Failed to get all events");
         assert_eq!(all_events.len(), 2);
@@ -762,22 +780,22 @@ mod tests {
         let conn = setup_test_db();
 
         // Simulate a typical issue lifecycle
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
         insert_created_event(&conn, "test-001", "alice").expect("Created");
-        conn.execute("COMMIT").expect("Commit");
+        conn.execute("COMMIT", []).expect("Commit");
 
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
         insert_status_changed_event(&conn, "test-001", "alice", "open", "in_progress")
             .expect("Status change");
-        conn.execute("COMMIT").expect("Commit");
+        conn.execute("COMMIT", []).expect("Commit");
 
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
         insert_commented_event(&conn, "test-001", "bob", "Working on this").expect("Comment");
-        conn.execute("COMMIT").expect("Commit");
+        conn.execute("COMMIT", []).expect("Commit");
 
-        conn.execute("BEGIN").expect("Failed to start tx");
+        conn.execute("BEGIN", []).expect("Failed to start tx");
         insert_closed_event(&conn, "test-001", "alice", Some("Done")).expect("Closed");
-        conn.execute("COMMIT").expect("Commit");
+        conn.execute("COMMIT", []).expect("Commit");
 
         let events = get_events(&conn, "test-001", 0).expect("Failed to get events");
         assert_eq!(events.len(), 4);

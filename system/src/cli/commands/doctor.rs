@@ -8,9 +8,8 @@ use crate::output::OutputContext;
 use crate::sync::{
     PathValidation, scan_conflict_markers, validate_no_git_path, validate_sync_path,
 };
-use fsqlite::Connection;
-use fsqlite_types::SqliteValue;
 use rich_rust::prelude::*;
+use rusqlite::Connection;
 use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -167,25 +166,21 @@ fn render_doctor_rich(report: &DoctorReport, ctx: &OutputContext) {
 }
 
 fn collect_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
-    let rows = conn.query(&format!("PRAGMA table_info({table})"))?;
-    let mut columns = Vec::new();
-    for row in &rows {
-        if let Some(name) = row.get(1).and_then(SqliteValue::as_text) {
-            columns.push(name.to_string());
-        }
-    }
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, Option<String>>(1))?
+        .filter_map(|r| r.ok().flatten())
+        .collect();
     Ok(columns)
 }
 
 fn required_schema_checks(conn: &Connection, checks: &mut Vec<CheckResult>) -> Result<()> {
-    let rows = conn
-        .query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?;
-    let mut tables = Vec::new();
-    for row in &rows {
-        if let Some(name) = row.get(0).and_then(SqliteValue::as_text) {
-            tables.push(name.to_string());
-        }
-    }
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?;
+    let tables: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, Option<String>>(0))?
+        .filter_map(|r| r.ok().flatten())
+        .collect();
 
     let required_tables = [
         "issues",
@@ -284,11 +279,11 @@ fn required_schema_checks(conn: &Connection, checks: &mut Vec<CheckResult>) -> R
 
 fn check_integrity(conn: &Connection, checks: &mut Vec<CheckResult>) -> Result<()> {
     let result: String = conn
-        .query_row("PRAGMA integrity_check")?
-        .get(0)
-        .and_then(SqliteValue::as_text)
-        .unwrap_or("error")
-        .to_string();
+        .query_row("PRAGMA integrity_check", [], |row| {
+            row.get::<_, Option<String>>(0)
+        })?
+        .flatten()
+        .unwrap_or_else(|| "error".to_string());
     if result.trim().eq_ignore_ascii_case("ok") {
         push_check(
             checks,
@@ -409,11 +404,12 @@ fn check_db_count(
     jsonl_count: Option<usize>,
     checks: &mut Vec<CheckResult>,
 ) -> Result<()> {
-    let db_count: i64 = conn.query_row(
-        "SELECT count(*) FROM issues WHERE (ephemeral = 0 OR ephemeral IS NULL) AND id NOT LIKE '%-wisp-%'",
-    )?
-        .get(0)
-        .and_then(SqliteValue::as_integer)
+    let db_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM issues WHERE (ephemeral = 0 OR ephemeral IS NULL) AND id NOT LIKE '%-wisp-%'",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
         .unwrap_or(0);
 
     if let Some(jsonl_count) = jsonl_count {
@@ -674,25 +670,39 @@ fn check_sync_metadata(
 ) {
     // Get metadata
     let last_import: Option<String> = conn
-        .query_row("SELECT value FROM metadata WHERE key = 'last_import_time'")
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'last_import_time'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
         .ok()
-        .and_then(|row| row.get(0).and_then(SqliteValue::as_text).map(String::from));
+        .flatten();
 
     let last_export: Option<String> = conn
-        .query_row("SELECT value FROM metadata WHERE key = 'last_export_time'")
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'last_export_time'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
         .ok()
-        .and_then(|row| row.get(0).and_then(SqliteValue::as_text).map(String::from));
+        .flatten();
 
     let jsonl_hash: Option<String> = conn
-        .query_row("SELECT value FROM metadata WHERE key = 'jsonl_content_hash'")
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'jsonl_content_hash'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
         .ok()
-        .and_then(|row| row.get(0).and_then(SqliteValue::as_text).map(String::from));
+        .flatten();
 
     // Check dirty issues count
     let dirty_count: i64 = conn
-        .query_row("SELECT count(*) FROM dirty_issues")
+        .query_row("SELECT count(*) FROM dirty_issues", [], |row| {
+            row.get::<_, Option<i64>>(0)
+        })
         .ok()
-        .and_then(|row| row.get(0).and_then(SqliteValue::as_integer))
+        .flatten()
         .unwrap_or(0);
 
     let mut details = serde_json::json!({
@@ -870,7 +880,7 @@ pub fn execute(cli: &config::CliOverrides, ctx: &OutputContext) -> Result<()> {
 
     let db_path = paths.db_path;
     if db_path.exists() {
-        match Connection::open(db_path.to_string_lossy().into_owned()) {
+        match Connection::open(&db_path) {
             Ok(conn) => {
                 required_schema_checks(&conn, &mut checks)?;
                 check_integrity(&conn, &mut checks)?;
@@ -915,7 +925,6 @@ pub fn execute(cli: &config::CliOverrides, ctx: &OutputContext) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fsqlite::Connection;
     use tempfile::NamedTempFile;
 
     fn find_check<'a>(checks: &'a [CheckResult], name: &str) -> Option<&'a CheckResult> {
