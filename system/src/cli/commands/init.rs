@@ -107,6 +107,9 @@ pub fn execute(
 # Temporary
 last-touched
 *.tmp
+
+# Recovery bundles
+.br_backups/
 ";
         fs::write(gitignore_path, gitignore)?;
     }
@@ -433,6 +436,7 @@ mod tests {
         assert!(content.contains("*.db-wal"));
         assert!(content.contains("*.db-shm"));
         assert!(content.contains("*.lock"));
+        assert!(content.contains(".br_backups/"));
         info!("test_gitignore_excludes_db_files: assertions passed");
     }
 }

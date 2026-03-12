@@ -759,6 +759,9 @@ pub enum Commands {
     /// Run read-only diagnostics
     Doctor,
 
+    /// Run stable health diagnostics
+    Health,
+
     /// Epic management commands
     Epic {
         #[command(subcommand)]
@@ -770,6 +773,9 @@ pub enum Commands {
 
     /// Manage local history backups
     History(HistoryArgs),
+
+    /// Create a recoverable workspace backup bundle
+    Backup(BackupArgs),
 
     /// Show diagnostic metadata about the workspace
     Info(InfoArgs),
@@ -818,6 +824,9 @@ pub enum Commands {
 
     /// Reopen an issue
     Reopen(ReopenArgs),
+
+    /// Restore a workspace backup bundle
+    Restore(RestoreArgs),
 
     /// Emit JSON Schemas for br output types (for agent/tooling integration)
     Schema(SchemaArgs),
@@ -2212,6 +2221,17 @@ pub struct HistoryArgs {
     pub command: Option<HistoryCommands>,
 }
 
+#[derive(Args, Debug, Clone, Default)]
+pub struct BackupArgs {
+    /// Write the backup bundle to this directory
+    #[arg(long, short = 'o')]
+    pub output: Option<PathBuf>,
+
+    /// Include `.br_history/` files in the backup bundle
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub include_history: bool,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum HistoryCommands {
     /// List history backups
@@ -2238,6 +2258,20 @@ pub enum HistoryCommands {
         #[arg(long)]
         older_than: Option<u32>,
     },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RestoreArgs {
+    /// Backup bundle directory created by `br backup`
+    pub source: PathBuf,
+
+    /// Verify backup checksums before and after restore
+    #[arg(long)]
+    pub verify: bool,
+
+    /// Overwrite existing workspace files
+    #[arg(long, short = 'f')]
+    pub force: bool,
 }
 
 /// Arguments for the version command.

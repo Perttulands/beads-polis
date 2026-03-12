@@ -74,7 +74,10 @@ Claim semantics: only the holder (or `operator`) can heartbeat, unclaim, or clos
 
 | Command | Description |
 |---------|-------------|
-| `br doctor` | Health check: JSONL validity, index freshness, SQLite integrity, stale claims. Auto-fixes issues |
+| `br health` | Preferred health check: JSONL validity, index freshness, SQLite integrity, and sync metadata |
+| `br doctor` | Legacy alias for the same diagnostics surface as `br health` |
+| `br backup` | Create a recoverable backup bundle with checksums in `.beads/.br_backups/` by default |
+| `br restore <bundle> --verify --force` | Restore a backup bundle, always validate bundle checksums, and fail closed on post-restore integrity errors |
 | `br rebuild` | Force full index rebuild from JSONL |
 | `br compact` | Collapse event history into snapshots. Archives old log |
 | `br sync --import-only` | Rebuild index from JSONL |
@@ -112,7 +115,10 @@ Recovery:
   Corrupt index? Delete it. Next read auto-rebuilds from JSONL.
   Truncated last line? Discarded on read (crash resilience).
   Bad line in middle? Skipped, other events preserved.
+  Recovery drill? Run `br backup`, then `br restore <bundle> --verify --force`.
 ```
+
+See [RECOVERY.md](RECOVERY.md) for the operator runbook.
 
 ### Data Files
 

@@ -80,6 +80,7 @@ fn main() {
         }
         Commands::Sync(args) => commands::sync::execute(&args, cli.json, &overrides, &output_ctx),
         Commands::Doctor => commands::doctor::execute(&overrides, &output_ctx),
+        Commands::Health => commands::recovery::execute_health(&overrides, &output_ctx),
         Commands::Info(args) => commands::info::execute(&args, &overrides, &output_ctx),
         Commands::Schema(args) => commands::schema::execute(&args, &overrides, &output_ctx),
         Commands::Where => commands::r#where::execute(&overrides, &output_ctx),
@@ -98,6 +99,9 @@ fn main() {
             commands::config::execute(&command, cli.json, &overrides, &output_ctx)
         }
         Commands::History(args) => commands::history::execute(args, &overrides, &output_ctx),
+        Commands::Backup(args) => {
+            commands::recovery::execute_backup(&args, &overrides, &output_ctx)
+        }
         Commands::Defer(args) => {
             commands::defer::execute_defer(&args, cli.json || args.robot, &overrides, &output_ctx)
         }
@@ -112,6 +116,9 @@ fn main() {
         }
         Commands::Query { command } => commands::query::execute(&command, &overrides, &output_ctx),
         Commands::Graph(args) => commands::graph::execute(&args, &overrides, &output_ctx),
+        Commands::Restore(args) => {
+            commands::recovery::execute_restore(&args, &overrides, &output_ctx)
+        }
         Commands::Agents(args) => {
             let agents_args = commands::agents::AgentsArgs {
                 add: args.add,
@@ -149,11 +156,13 @@ const fn is_mutating_command(cmd: &Commands) -> bool {
         | Commands::Label { .. }
         | Commands::Comments(_)
         | Commands::Defer(_)
-        | Commands::Undefer(_) => true,
+        | Commands::Undefer(_)
+        | Commands::Restore(_) => true,
         Commands::Epic { command } => matches!(
             command,
             beads_rust::cli::EpicCommands::CloseEligible(args) if !args.dry_run
         ),
+        Commands::Doctor | Commands::Health | Commands::Backup(_) | Commands::History(_) => false,
         _ => false,
     }
 }
@@ -195,6 +204,7 @@ const fn should_auto_import(cmd: &Commands) -> bool {
         Commands::Init { .. }
         | Commands::Sync(_)
         | Commands::Doctor
+        | Commands::Health
         | Commands::Info(_)
         | Commands::Schema(_)
         | Commands::Where
@@ -203,6 +213,8 @@ const fn should_auto_import(cmd: &Commands) -> bool {
         | Commands::Audit { .. }
         | Commands::Config { .. }
         | Commands::History(_)
+        | Commands::Backup(_)
+        | Commands::Restore(_)
         | Commands::Agents(_) => false,
 
         #[cfg(feature = "self_update")]

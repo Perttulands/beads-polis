@@ -62,7 +62,7 @@ fn has_error(checks: &[CheckResult]) -> bool {
 }
 
 #[allow(clippy::unnecessary_wraps)]
-fn print_report(report: &DoctorReport, ctx: &OutputContext) -> Result<()> {
+fn print_report(report: &DoctorReport, command_name: &str, ctx: &OutputContext) -> Result<()> {
     if ctx.is_json() {
         ctx.json(report);
         return Ok(());
@@ -75,12 +75,12 @@ fn print_report(report: &DoctorReport, ctx: &OutputContext) -> Result<()> {
         return Ok(());
     }
 
-    print_report_plain(report);
+    print_report_plain(report, command_name);
     Ok(())
 }
 
-fn print_report_plain(report: &DoctorReport) {
-    println!("br doctor");
+fn print_report_plain(report: &DoctorReport, command_name: &str) {
+    println!("br {command_name}");
     for check in &report.checks {
         let label = match check.status {
             CheckStatus::Ok => "OK",
@@ -175,8 +175,9 @@ fn collect_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> 
 }
 
 fn required_schema_checks(conn: &Connection, checks: &mut Vec<CheckResult>) -> Result<()> {
-    let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?;
+    let mut stmt = conn.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )?;
     let tables: Vec<String> = stmt
         .query_map([], |row| row.get::<_, Option<String>>(0))?
         .filter_map(|r| r.ok().flatten())
@@ -282,7 +283,6 @@ fn check_integrity(conn: &Connection, checks: &mut Vec<CheckResult>) -> Result<(
         .query_row("PRAGMA integrity_check", [], |row| {
             row.get::<_, Option<String>>(0)
         })?
-        .flatten()
         .unwrap_or_else(|| "error".to_string());
     if result.trim().eq_ignore_ascii_case("ok") {
         push_check(
@@ -803,8 +803,22 @@ fn check_sync_metadata(
 /// Returns an error if report serialization fails or if IO operations fail.
 #[allow(clippy::too_many_lines)]
 pub fn execute(cli: &config::CliOverrides, ctx: &OutputContext) -> Result<()> {
+    execute_named("doctor", cli, ctx)
+}
+
+/// Execute doctor-style diagnostics under the provided command name.
+///
+/// # Errors
+///
+/// Returns an error if report serialization fails or if IO operations fail.
+#[allow(clippy::too_many_lines)]
+pub fn execute_named(
+    command_name: &str,
+    cli: &config::CliOverrides,
+    ctx: &OutputContext,
+) -> Result<()> {
     let mut checks = Vec::new();
-    let Ok(beads_dir) = config::discover_beads_dir(None) else {
+    let Ok(beads_dir) = config::discover_beads_dir_with_cli(cli) else {
         push_check(
             &mut checks,
             "beads_dir",
@@ -816,7 +830,7 @@ pub fn execute(cli: &config::CliOverrides, ctx: &OutputContext) -> Result<()> {
             ok: !has_error(&checks),
             checks,
         };
-        print_report(&report, ctx)?;
+        print_report(&report, command_name, ctx)?;
         std::process::exit(1);
     };
 
@@ -834,7 +848,7 @@ pub fn execute(cli: &config::CliOverrides, ctx: &OutputContext) -> Result<()> {
                 ok: !has_error(&checks),
                 checks,
             };
-            print_report(&report, ctx)?;
+            print_report(&report, command_name, ctx)?;
             std::process::exit(1);
         }
     };
@@ -913,7 +927,7 @@ pub fn execute(cli: &config::CliOverrides, ctx: &OutputContext) -> Result<()> {
         ok: !has_error(&checks),
         checks,
     };
-    print_report(&report, ctx)?;
+    print_report(&report, command_name, ctx)?;
 
     if !report.ok {
         std::process::exit(1);

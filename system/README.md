@@ -398,7 +398,10 @@ git commit -m "Fix: login timeout (bd-a1b2c3)"
 | Command | Description | Example |
 |---------|-------------|---------|
 | `sync` | Sync DB ↔ JSONL | `br sync --flush-only` |
-| `doctor` | Run diagnostics | `br doctor` |
+| `health` | Preferred diagnostics surface | `br health` |
+| `doctor` | Legacy alias for `br health` | `br doctor` |
+| `backup` | Create a recoverable backup bundle | `br backup` |
+| `restore` | Restore a backup bundle, validate checksums, and fail closed on integrity errors | `br restore /path/to/bundle --verify --force` |
 | `stats` | Project statistics | `br stats` |
 | `config` | Manage config | `br config --list` |
 | `upgrade` | Self-update | `br upgrade` |
@@ -600,7 +603,7 @@ git status .beads/
 br sync --import-only
 
 # 3. If database seems stale:
-br doctor
+br health
 ```
 
 ### Command Output is Garbled
