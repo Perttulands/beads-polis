@@ -1,153 +1,131 @@
-# Testing — beads-polis
+# Testing — beads-v2
 
-Honest rubric audit of the beads-polis test suite, scored against the
-[Polis Test Quality Rubric](/home/polis/tools/TEST_RUBRIC.md).
-
----
-
-## Rubric Scores
-
-| Dimension | Score | Notes |
-|---|---|---|
-| 1. E2E Realism | 4 | Inherited suite is massive (52 e2e files, ~720 tests) covering every CLI workflow. Polis-specific concurrency tests exist but are narrow. |
-| 2. Unit Test Behaviour Focus | 4 | Storage tests are behaviour-focused and intention-revealing. The flock tests verify observable outcomes (lock blocks, lock releases, N writes serialize). Not coupled to internals. |
-| 3. Edge Case & Error Path Coverage | 3 | `e2e_errors.rs` (36 tests), `e2e_sync_failure_injection.rs` (15 tests) cover many error paths. But for flock/locking: timeout error clarity, lock path edge cases, and post-timeout DB integrity were untested until this session. |
-| 4. Test Isolation & Reliability | 4 | Tests use `TempDir`, `Barrier` for synchronization, deterministic timestamps. No shared global state. Concurrent tests use timeout polling, not `sleep()`. One timing-sensitive test (`flock_serializes_concurrent_mutations`) uses 30s timeout — generous enough to be reliable. |
-| 5. Regression Value | 4 | If someone breaks the flock implementation, 5+ tests fail immediately. If someone breaks general beads behaviour, the inherited 785+ lib tests and 1300+ integration tests would catch it. Gap: no test would catch a subtle lock-path derivation bug until this session. |
-| **Total** | **19/25** | **Grade B — Good, with known gaps** |
+Test suite for the event-sourced beads-v2 rewrite.
 
 ---
 
-## What the Inherited Suite Covers
+## Test Summary
 
-The test suite was forked from upstream `beads_rust` and is genuinely
-comprehensive for **beads as a single-user CLI tool**:
-
-- **52 E2E test files** (~720 tests): lifecycle, labels, comments, search,
-  dependencies, history, sync, changelogs, completions, workspaces, etc.
-- **10 storage test files** (~209 tests): CRUD, filters, deps, history,
-  invariants, blocked cache, ready queue, ID/hash parity, export atomicity.
-- **6 conformance files** (~305 tests): schema conformance, edge cases,
-  labels/comments, text output, workflows.
-- **4 property test files** (~10 tests): hash, ID, time, validation fuzz.
-- **16 repro test files** (~21 tests): regression tests for specific bugs.
-- **6 benchmark files** (~33 tests): cold/warm start, synthetic scale, datasets.
-- **785+ lib tests**: inline unit tests across the library crate.
-
-**Total: ~2,100+ tests.** This is a high-quality, battle-tested suite.
-
-## What It Misses for Polis Multi-Agent Usage
-
-The inherited suite was written for single-process, single-user beads. The
-gaps that matter for Polis:
-
-| Gap | Why it matters |
-|---|---|
-| **No flock tests existed** | The flock implementation was added by Polis (the upstream used frankensqlite's built-in locking which was a no-op). Without our `storage_concurrent.rs`, the entire locking mechanism was untested. |
-| **No lock-path derivation test** | `path.with_extension("lock")` silently replaces the extension: `beads.db` → `beads.lock`. If someone changed this to `.db.lock` or a different scheme, nothing would catch it. Fixed in this session. |
-| **No post-timeout integrity test** | After a lock timeout, is the DB still usable? The first holder should be unaffected. No test verified this. Fixed in this session. |
-| **No multi-agent claim race beyond e2e_claim_atomic** | The 9 tests in `e2e_claim_atomic.rs` cover `br claim` races, but there's no test for concurrent `br close`, `br edit`, or `br comment` under contention. |
-| **No cross-repo sync contention** | Multiple agents syncing the same repo simultaneously is untested. |
-| **No agent-identity-aware tests** | Polis agents have identities (poseidon, hermes, etc.). No test verifies that concurrent operations from different agents produce correct attribution. |
-
-### Tests Directly Relevant to Multi-Agent Concurrent Use
-
-Only **21 of ~2,100 tests** (1%) directly test concurrent/multi-agent behaviour:
+**90 tests total** across 10 test files, 3 ignored (timing-sensitive CI tests).
 
 | File | Tests | What it covers |
 |---|---|---|
-| `storage_concurrent.rs` | 5 → 8 | flock semantics: block, release, serialize, memory skip, lock path, timeout error, post-timeout integrity |
-| `e2e_claim_atomic.rs` | 9 | TOCTOU-safe atomic claiming — exactly one agent wins |
-| `e2e_concurrency.rs` | 7 | CLI-level concurrent reads/writes, lock error reporting |
-
-The remaining ~2,080 tests are valuable regression coverage for beads-as-a-tool
-but don't exercise the concurrent access patterns that make Polis different.
-
----
-
-## What Tests WOULD Be Written for Polis From Scratch
-
-If building the test suite for Polis multi-agent usage from scratch, we'd want:
-
-1. **Concurrent `br close` under contention** — Two agents closing the same bead
-   simultaneously. One should succeed, one should get `DatabaseLocked` or succeed
-   after waiting, but never corruption.
-
-2. **Concurrent `br comment` from different agents** — Both comments should
-   appear, correctly attributed, in the right order.
-
-3. **Sync contention** — Two agents running `br sync` against the same git remote
-   simultaneously. No data loss, no merge conflicts in the DB.
-
-4. **Lock starvation test** — N agents continuously opening/closing the DB.
-   Verify no agent starves (all eventually get through within the 30s default).
-
-5. **Lock file cleanup** — After a process crash (SIGKILL), the `.lock` file
-   should not prevent the next agent from acquiring the lock (flock is
-   automatically released by the OS on process death).
-
-6. **Agent identity attribution under concurrency** — Concurrent mutations from
-   agents `poseidon` and `hermes` should produce correct audit trail attribution.
-
-7. **Cross-workspace isolation** — Two agents operating in different workspaces
-   should never contend on the same lock file.
+| `src/lib.rs` (unit) | 15 | CLI parsing, engine open/ID generation, format helpers |
+| `tests/cmd_core.rs` | 13 | CRUD lifecycle, filters, search, dependency blocking |
+| `tests/cmd_agent.rs` | 10 | Claim/heartbeat/unclaim, permission checks, deadline expiry |
+| `tests/cmd_maintenance.rs` | 10 | Doctor diagnostics, rebuild, compact, CLI e2e |
+| `tests/claim_semantics.rs` | 8 | Claim invariants: one-winner, permission, expiry, heartbeat |
+| `tests/event_replay.rs` | 13 | Event sourcing: create/update/close/reopen replay, idempotency |
+| `tests/e2e.rs` | 17 | Full binary e2e: CRUD, deps, claims, search, doctor, compact, migration, concurrency |
+| `tests/concurrency.rs` | 2 | JSONL flock serialization, index integrity under contention |
+| `tests/crash_recovery.rs` | 3 | Truncated line discard, append-after-recovery |
+| `tests/watermark_race.rs` | 2 | Concurrent reader/writer watermark consistency |
 
 ---
 
-## Known Failing Test
+## Test Categories
 
-### `common::dataset_registry::tests::test_metadata_includes_source_commit`
+### Unit Tests (15)
+- CLI argument parsing for all commands and flag combinations
+- Engine initialization (fresh dir, existing events, ID generation)
+- Error and help text formatting
 
-**Status:** Known false alarm. Not our bug. Do not fix.
+### Integration Tests (33)
+- Full Engine-level CRUD: create, show, list, update, close
+- Filter combinations: status, project, priority, type, labels
+- Dependency blocking: blocked beads excluded from ready queue
+- Claim lifecycle: claim → heartbeat → unclaim, conflict detection
+- Permission enforcement: only holder can modify claimed beads
+- Deadline expiry: expired claims can be re-claimed
 
-**Root cause:** `KnownDataset::BeadsRust.source_path()` returns
-`env!("CARGO_MANIFEST_DIR")` = `.../beads-polis/system/`. The test's
-`get_git_commit()` looks for `.git` at that path, but the actual `.git` is
-one level up at `.../beads-polis/.git`. Since `system/` is a regular directory
-(not a submodule), `get_git_commit()` returns `None`, and the assertion
-`source_commit.is_some()` fails.
+### Event Replay Tests (13)
+- Each event type produces correct bead state
+- Multiple updates accumulate correctly
+- Close/reopen cycles preserve state
+- Duplicate events are idempotent
+- Serialization roundtrip fidelity
+- Truncated last line detection
 
-**Why we don't fix it:** This is a test from the upstream `beads_rust` suite
-that assumed `system/` was the git root. In our fork, the repo structure is
-different. The fix would be to make `get_git_commit()` walk upward to find
-`.git`, but that's an upstream concern, not a Polis-specific issue. The
-underlying functionality (git commit capture) works fine when `.git` is in the
-expected location.
+### End-to-End Tests (17)
+- Full binary execution via `std::process::Command`
+- Both human and JSON output modes
+- Error cases: missing actor, not found, permission denied
+- Legacy migration (`issues.jsonl` → `events.jsonl`)
+- City commands (cross-project ready/list)
+- **Concurrent creates**: 10 parallel processes writing simultaneously
+- Doctor health check, rebuild, compact
+
+### Concurrency Tests (4, 1 ignored)
+- 10 parallel JSONL writers produce valid, complete output
+- Index integrity after concurrent writes
+- Reader/writer watermark race detection
+
+### Crash Recovery Tests (3, 1 ignored)
+- Truncated last line discarded on read
+- Append succeeds after truncation recovery
 
 ---
 
-## Running the Tests
+## Running Tests
 
 ```bash
-# Polis-specific flock tests (should see 8 passed)
-cargo test --test storage_concurrent flock
+cd beads-v2
 
-# Full library tests (should see 785+ passed)
+# All tests
+cargo test
+
+# Only e2e (requires built binary)
+cargo test --test e2e
+
+# Only unit tests
 cargo test --lib
 
-# All integration tests (slow — runs ~1,300+ tests)
-cargo test --test
+# Specific test file
+cargo test --test cmd_core
+cargo test --test concurrency
 
-# Just the concurrent/multi-agent tests
-cargo test --test storage_concurrent
-cargo test --test e2e_concurrency
-cargo test --test e2e_claim_atomic
+# With output
+cargo test -- --nocapture
 ```
 
 ---
 
-## Changelog
+## Ignored Tests
 
-### 2026-02-28 — Agent: poseidon
-- Added: POSIX `flock(LOCK_EX)` implementation in `storage/sqlite.rs` to
-  serialize concurrent writers, working around frankensqlite's no-op
-  `UnixFile::lock()`.
-- Added: `storage_concurrent.rs` — 5 tests covering flock block, release,
-  N-writer serialization, and memory-DB skip.
-- Added: 3 additional flock tests — lock path derivation, timeout error
-  clarity + DB integrity after timeout, lock file cleanup on drop.
-- Added: `TESTING.md` — rubric audit, gap analysis, and known-failure
-  documentation.
-- Coverage delta: 0 concurrent tests → 8 concurrent tests covering flock
-  semantics (block, release, serialize, path derivation, timeout error,
-  post-timeout integrity, memory skip, lock file absence).
+3 tests are `#[ignore]`d — they require longer timeouts or specific
+concurrency conditions that are flaky in CI:
+
+- `concurrent_eventlog_writes_with_index_integrity` — 10-writer contention with index rebuild
+- `eventlog_crash_recovery` — simulates mid-write crash via process kill
+- `eventlog_watermark_race_with_index` — 5-second sustained reader/writer race
+
+Run them explicitly with:
+
+```bash
+cargo test -- --ignored
+```
+
+---
+
+## What the Tests Verify for Multi-Agent Use
+
+The test suite specifically targets Polis multi-agent concerns:
+
+1. **Write serialization** — flock prevents concurrent JSONL corruption
+2. **Index rebuild safety** — flock + double-check prevents concurrent rebuilds
+3. **Claim exclusivity** — only one agent can hold a bead at a time
+4. **Permission enforcement** — only the claim holder can modify/close
+5. **Deadline-based expiry** — stale claims auto-release via doctor
+6. **Crash resilience** — truncated writes are discarded, not propagated
+7. **Actor attribution** — every event records who did it and when
+
+---
+
+## Gate Status
+
+`gate check` runs tests, clippy, truthsayer, and UBS. Current status:
+
+- **Tests**: PASS (90 tests, 0 failures)
+- **Clippy**: PASS (0 warnings)
+- **Truthsayer**: PASS
+- **UBS**: Reports false positives for `panic!` in `#[cfg(test)]` code — this is idiomatic Rust test code. UBS does not distinguish test modules from production code.

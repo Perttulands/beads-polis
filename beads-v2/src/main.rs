@@ -1,0 +1,40 @@
+//! beads-v2 (br) — Event-sourced work tracker for Polis.
+//!
+//! JSONL is the source of truth. SQLite is a derived, disposable index.
+//! See PRD.md for the full design.
+
+use beads_v2::cli;
+use clap::Parser;
+use std::io::IsTerminal;
+
+fn main() {
+    let parsed = cli::Cli::parse();
+    let json_mode = parsed.json;
+
+    match cli::dispatch(&parsed) {
+        Ok(Some(value)) => {
+            if json_mode {
+                println!(
+                    "{}",
+                    serde_json::to_string(&value).expect("failed to serialize output")
+                );
+            } else {
+                // Human-friendly formatting
+                cli::format_human(&parsed.command, &value);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let exit_code = e.exit_code();
+            if json_mode || !std::io::stderr().is_terminal() {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&e.to_json()).expect("failed to serialize error")
+                );
+            } else {
+                eprintln!("\x1b[31merror:\x1b[0m {e}");
+            }
+            std::process::exit(exit_code);
+        }
+    }
+}
