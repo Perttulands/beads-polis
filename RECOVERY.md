@@ -67,6 +67,13 @@ Restore always validates the backup bundle manifest and checksums before copying
 5. `br health --json`
 6. confirm the restored JSONL matches the bundle copy
 
+Automation helper:
+
+```bash
+cd system
+scripts/restore_drill.sh --mode manual --transcript ../restore-drills/2026-03-12-manual.md
+```
+
 ## When to Use Which Path
 
 - Index stale or disposable DB problem: prefer `br health`, then `br sync --import-only` or rebuild the DB from JSONL.
@@ -77,3 +84,4 @@ Restore always validates the backup bundle manifest and checksums before copying
 
 - `br backup` writes under `.beads/.br_backups/` by default, and new workspaces ignore that directory in `.beads/.gitignore`.
 - A restore drill should be completed before any schema or storage migration that raises `br` criticality.
+- CI runs the same drill helper and uploads the transcript/log bundle as the `br-restore-drill` artifact.

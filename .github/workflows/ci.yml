@@ -84,3 +84,40 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -A clippy::pedantic -A clippy::nursery
+
+  restore-drill:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: system
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-02-19
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: system -> target
+
+      - name: Build release binary
+        run: cargo build --release --all-features
+
+      - name: Run restore drill
+        run: |
+          chmod +x scripts/restore_drill.sh
+          BR_BINARY="$PWD/target/release/br" \
+          scripts/restore_drill.sh \
+            --mode ci \
+            --artifact-dir "$PWD/target/restore-drill/ci" \
+            --transcript "$PWD/target/restore-drill/restore-drill-ci.md"
+
+      - name: Upload restore drill artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: br-restore-drill
+          path: system/target/restore-drill/
