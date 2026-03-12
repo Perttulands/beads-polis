@@ -66,6 +66,7 @@ pub struct Filters {
     pub priority: Option<u8>,
     pub bead_type: Option<BeadType>,
     pub label: Option<String>,
+    pub assignee: Option<String>,
 }
 
 pub struct Index {
@@ -239,13 +240,18 @@ impl Index {
             bind_values.push(Box::new(t.as_str().to_string()));
             idx += 1;
         }
+        if let Some(ref a) = filters.assignee {
+            conditions.push(format!("assignee = ?{}", idx));
+            bind_values.push(Box::new(a.clone()));
+            idx += 1;
+        }
         if let Some(ref l) = filters.label {
             conditions.push(format!(
                 "id IN (SELECT bead_id FROM labels WHERE label = ?{})",
                 idx
             ));
             bind_values.push(Box::new(l.clone()));
-            // idx += 1; // last one, no need to increment
+            let _ = idx; // suppress unused warning
         }
 
         let where_clause = if conditions.is_empty() {

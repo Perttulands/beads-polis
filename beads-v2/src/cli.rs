@@ -1156,6 +1156,7 @@ fn list_filters(args: &ListArgs) -> Filters {
         priority: args.priority,
         bead_type: args.bead_type.as_ref().map(|t| t.to_core()),
         label: None,
+        assignee: args.assignee.clone(),
     }
 }
 
