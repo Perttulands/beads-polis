@@ -1,6 +1,6 @@
-# Testing — beads-v2
+# Testing — beads-polis
 
-Test suite for the event-sourced beads-v2 rewrite.
+Test suite for the event-sourced beads-polis rewrite.
 
 ---
 
@@ -69,8 +69,6 @@ Test suite for the event-sourced beads-v2 rewrite.
 ## Running Tests
 
 ```bash
-cd beads-v2
-
 # All tests
 cargo test
 

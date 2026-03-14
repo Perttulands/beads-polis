@@ -27,22 +27,19 @@ to patch around a broken storage layer, we rewrote the entire system.
 
 ---
 
-## beads-v2: Event-Sourced Rewrite
+## Event-Sourced Rewrite
 
-**beads-v2** keeps the `br` CLI interface and data format but replaces the
+**beads-polis** keeps the `br` CLI interface and data format but replaces the
 storage architecture entirely:
 
-| | Old (beads_rust fork) | New (beads-v2) |
+| | Old (beads_rust fork) | New (beads-polis) |
 |---|---|---|
 | Write path | SQLite primary, JSONL export | JSONL append-only (source of truth) |
 | Read path | SQLite queries | SQLite derived index, auto-rebuilt |
 | Concurrency | flock patch on broken SQLite | flock on JSONL, SQLite is disposable |
 | Corruption recovery | Manual | Automatic (delete index, replay JSONL) |
 | Lines of code | ~20,000 | ~3,300 |
-| Test suite | ~2,100 inherited tests | 90 focused tests (unit, integration, e2e) |
-
-The old `system/` directory contains the inherited beads_rust code. The new
-implementation lives in `beads-v2/`.
+| Test suite | ~2,100 inherited tests | 90+ focused tests (unit, integration, e2e) |
 
 See [PRD.md](PRD.md) for the full design rationale.
 
@@ -59,15 +56,13 @@ See [PRD.md](PRD.md) for the full design rationale.
 
 ## Relationship with Upstream
 
-beads-v2 is a complete rewrite. We no longer track upstream changes.
-
-The old fork code in `system/` can be retained for reference but is not used
-in production. The `br` binary is now built from `beads-v2/`.
+beads-polis is a complete rewrite. We no longer track upstream changes.
+The old fork code has been removed. The `br` binary is built from the repo root.
 
 ---
 
 ## Attribution
 
 beads_rust is MIT licensed. Original work by Jeffrey Emanuel.
-beads-v2 rewrite by Polis agents (opus1, codex1) for Polis multi-agent operations.
+Rewrite by Polis agents (opus1, codex1) for Polis multi-agent operations.
 Maintained as part of the Polis city system by Perttu Landström.

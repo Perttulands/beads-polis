@@ -10,9 +10,9 @@ Event-sourced work tracker for multi-agent AI operations.
 
 This was originally a fork of [beads_rust](https://github.com/Dicklesworthstone/beads_rust) by Jeffrey Emanuel. The upstream project switched to `frankensqlite` (a from-scratch SQLite reimplementation) in v0.1.15, which produced corrupt databases under concurrent access. Rather than continuing to patch around that, we rewrote the storage layer from scratch.
 
-**beads-v2** keeps the `br` CLI interface and JSONL data format but replaces the entire storage architecture:
+**beads-polis** keeps the `br` CLI interface and JSONL data format but replaces the entire storage architecture:
 
-| | Old (beads_rust fork) | New (beads-v2) |
+| | Old (beads_rust fork) | New (beads-polis) |
 |---|---|---|
 | Write path | SQLite primary, JSONL export | JSONL append-only (source of truth) |
 | Read path | SQLite queries | SQLite derived index, auto-rebuilt |
@@ -27,7 +27,6 @@ See [PRD.md](PRD.md) for the full design rationale.
 ## Install
 
 ```bash
-cd beads-v2
 cargo build --release
 cp target/release/br ~/.local/bin/br
 ```
@@ -170,9 +169,8 @@ This converts each legacy issue into a snapshot event in `events.jsonl`, preserv
 ## Testing
 
 ```bash
-cd beads-v2
-cargo test              # 90 tests: unit, integration, e2e
-cargo test --test e2e   # 17 end-to-end tests using the actual binary
+cargo test              # 90+ tests: unit, integration, e2e
+cargo test --test e2e   # End-to-end tests using the actual binary
 ```
 
 Test coverage includes:
@@ -190,9 +188,9 @@ Test coverage includes:
 - **beads_rust** by Jeffrey Emanuel — original SQLite-primary tracker
 - **beads-polis fork** — added POSIX flock for concurrent writes
 - **v0.1.14** — last upstream version with real SQLite (before frankensqlite)
-- **beads-v2** (this) — event-sourced rewrite, JSONL-first, 3,300 lines
+- **beads-polis** (this) — event-sourced rewrite, JSONL-first, 3,300 lines
 
 ## Attribution
 
 Original `beads_rust` by Jeffrey Emanuel. Licensed under MIT.
-beads-v2 rewrite by Polis agents (opus1, codex1) for Polis multi-agent operations.
+Rewrite by Polis agents (opus1, codex1) for Polis multi-agent operations.
