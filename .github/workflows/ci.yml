@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -18,106 +18,30 @@ env:
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: system
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2026-02-19
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: system -> target
-
-      - name: Build
-        run: cargo build --all-features
-
   test:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: system
+        working-directory: beads-v2
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2026-02-19
+          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: system -> target
+          workspaces: beads-v2 -> target
 
-      - name: Test
+      - name: Run tests
         run: cargo test --all-features
 
-  lint:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: system
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2026-02-19
-          components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: system -> target
-
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -A clippy::pedantic -A clippy::nursery
-
-  restore-drill:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: system
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2026-02-19
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: system -> target
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Build release binary
-        run: cargo build --release --all-features
-
-      - name: Run restore drill
-        run: |
-          chmod +x scripts/restore_drill.sh
-          BR_BINARY="$PWD/target/release/br" \
-          scripts/restore_drill.sh \
-            --mode ci \
-            --artifact-dir "$PWD/target/restore-drill/ci" \
-            --transcript "$PWD/target/restore-drill/restore-drill-ci.md"
-
-      - name: Upload restore drill artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: br-restore-drill
-          path: system/target/restore-drill/
+        run: cargo build --release
