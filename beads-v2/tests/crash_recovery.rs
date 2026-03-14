@@ -159,7 +159,7 @@ fn append_after_truncation_recovery() {
         let file = fs::File::open(&jsonl_path).unwrap();
         BufReader::new(file)
             .lines()
-            .filter_map(|l| l.ok())
+            .map_while(|l| l.ok())
             .filter(|l| !l.trim().is_empty() && serde_json::from_str::<Event>(l).is_ok())
             .collect()
     };
@@ -189,7 +189,7 @@ fn append_after_truncation_recovery() {
         let file = fs::File::open(&jsonl_path).unwrap();
         BufReader::new(file)
             .lines()
-            .filter_map(|l| l.ok())
+            .map_while(|l| l.ok())
             .filter(|l| !l.trim().is_empty())
             .map(|l| serde_json::from_str(&l).unwrap())
             .collect()

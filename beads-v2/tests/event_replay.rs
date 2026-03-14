@@ -189,7 +189,7 @@ fn truncated_last_json_line_is_detected_and_discarded() {
     let create = create_event("test-007", "Truncation test");
     let create_json = serde_json::to_string(&create).unwrap();
 
-    let lines = vec![
+    let lines = [
         create_json.clone(),
         // Truncated line: valid JSON prefix but incomplete
         r#"{"op":"update","ts":"2026-03-12T18:00:00Z","actor":"at"#.to_string(),

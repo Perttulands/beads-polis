@@ -465,7 +465,7 @@ fn e2e_concurrent_creates() {
     let mut handles = Vec::new();
     for i in 0..10 {
         let mut cmd = Command::new(bin);
-        cmd.env("POLIS_ACTOR", &format!("agent-{i}"));
+        cmd.env("POLIS_ACTOR", format!("agent-{i}"));
         cmd.env("BEADS_DIR", tmp.path().to_str().unwrap());
         cmd.args(["--json", "create", &format!("Concurrent bead {i}")]);
         handles.push(cmd.spawn().expect("failed to spawn"));

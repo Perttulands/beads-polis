@@ -191,7 +191,7 @@ fn claim_sets_in_progress_and_assignee() {
     let deadline = bead.claim_deadline.unwrap();
     let diff = (deadline - claimed).num_seconds();
     assert!(
-        diff >= 3590 && diff <= 3610,
+        (3590..=3610).contains(&diff),
         "Deadline should be ~3600s from claimed_at, got {}s",
         diff
     );
@@ -269,7 +269,7 @@ fn heartbeat_extends_deadline() {
     let hb = after.last_heartbeat.unwrap();
     let diff = (new_deadline - hb).num_seconds();
     assert!(
-        diff >= 3590 && diff <= 3610,
+        (3590..=3610).contains(&diff),
         "Deadline should be ~1h from heartbeat, got {}s",
         diff
     );
