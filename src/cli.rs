@@ -111,14 +111,34 @@ pub enum Commands {
     /// Check JSONL integrity, index freshness, stale claims
     Doctor,
 
+    /// Read-only health check (JSON summary of store state)
+    Health,
+
     /// Force index rebuild from JSONL
     Rebuild,
 
     /// Force compaction of the event log
     Compact,
 
+    /// Back up events.jsonl to a timestamped snapshot
+    Backup,
+
+    /// Restore events.jsonl from a backup file
+    Restore(RestoreArgs),
+
     /// City-wide commands (cross-project)
     City(CityArgs),
+
+    // -- Intelligence (replaces bv) ------------------------------------------
+
+    /// Triage: search beads for work dispatch (replaces bv --robot-search)
+    Triage(TriageArgs),
+
+    /// Find beads related to a given bead (replaces bv --robot-related)
+    Related(RelatedArgs),
+
+    /// Generate execution plan from open P1 beads (replaces bv --robot-plan)
+    Plan(PlanArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +374,42 @@ pub enum CityCommands {
 }
 
 // ---------------------------------------------------------------------------
+// Intelligence command args (bv replacements)
+// ---------------------------------------------------------------------------
+
+#[derive(Args, Debug)]
+pub struct TriageArgs {
+    /// Search query (matched against title + description)
+    #[arg(long)]
+    pub search: String,
+
+    /// Max results to return
+    #[arg(long, default_value_t = 10)]
+    pub limit: usize,
+}
+
+#[derive(Args, Debug)]
+pub struct RelatedArgs {
+    /// Bead ID to find relations for
+    pub id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct PlanArgs {
+    // No extra args — generates plan from open P1 beads grouped by parent epic.
+}
+
+#[derive(Args, Debug)]
+pub struct RestoreArgs {
+    /// Path to the backup file to restore from
+    pub file: PathBuf,
+
+    /// Overwrite current events.jsonl without confirmation
+    #[arg(long, short = 'f')]
+    pub force: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Value enums
 // ---------------------------------------------------------------------------
 
@@ -567,12 +623,15 @@ impl CliError {
 /// Returns Ok(json_value) on success (printed to stdout),
 /// or Err(CliError) on failure (printed to stderr).
 pub fn dispatch(cli: &Cli) -> Result<Option<serde_json::Value>, CliError> {
-    // Doctor and Rebuild don't need actor
+    // Doctor, Health, Rebuild, Compact, Backup, Restore don't need actor
     let db = cli.db.as_deref();
     match &cli.command {
         Commands::Doctor => return cmd_doctor(db),
+        Commands::Health => return cmd_health(db),
         Commands::Rebuild => return cmd_rebuild(db),
         Commands::Compact => return cmd_compact(db),
+        Commands::Backup => return cmd_backup(db),
+        Commands::Restore(args) => return cmd_restore(db, args),
         _ => {}
     }
 
@@ -599,8 +658,14 @@ pub fn dispatch(cli: &Cli) -> Result<Option<serde_json::Value>, CliError> {
         // -- City -----------------------------------------------------------
         Commands::City(args) => cmd_city(&engine, args),
 
+        // -- Intelligence (bv replacements) ---------------------------------
+        Commands::Triage(args) => cmd_triage(&engine, args),
+        Commands::Related(args) => cmd_related(&engine, args),
+        Commands::Plan(_) => cmd_plan(&engine),
+
         // Already handled above
-        Commands::Doctor | Commands::Rebuild | Commands::Compact => unreachable!(),
+        Commands::Doctor | Commands::Health | Commands::Rebuild | Commands::Compact
+        | Commands::Backup | Commands::Restore(_) => unreachable!(),
     }
 }
 
@@ -998,6 +1063,256 @@ fn cmd_unclaim(engine: &Engine, actor: &str, args: &UnclaimArgs) -> Result<Optio
     })))
 }
 
+// ---------------------------------------------------------------------------
+// Intelligence command handlers (bv replacements)
+// ---------------------------------------------------------------------------
+
+fn cmd_triage(engine: &Engine, args: &TriageArgs) -> Result<Option<serde_json::Value>, CliError> {
+    let mut beads = engine.index.query_search(&args.search);
+    // Filter to open/in_progress only
+    beads.retain(|b| b.status == bead::Status::Open || b.status == bead::Status::InProgress);
+    // Sort by priority (lower = higher priority), then by title match closeness
+    beads.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created_at.cmp(&b.created_at)));
+    let total = beads.len();
+    beads.truncate(args.limit);
+
+    let results: Vec<serde_json::Value> = beads
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            // Simple relevance score: higher priority beads score higher, decay by position
+            let score = 1.0 - (i as f64 * 0.1).min(0.9);
+            serde_json::json!({
+                "id": b.id,
+                "title": b.title,
+                "status": b.status.as_str(),
+                "priority": b.priority,
+                "score": score,
+            })
+        })
+        .collect();
+
+    Ok(Some(serde_json::json!({
+        "query": args.search,
+        "results": results,
+        "total": total,
+    })))
+}
+
+fn cmd_related(engine: &Engine, args: &RelatedArgs) -> Result<Option<serde_json::Value>, CliError> {
+    let target = engine
+        .index
+        .query_show(&args.id)
+        .ok_or_else(|| CliError::NotFound(args.id.clone()))?;
+
+    let mut related: Vec<serde_json::Value> = Vec::new();
+
+    // 1. Same parent — strongest relationship
+    if let Some(ref parent) = target.parent {
+        let siblings = engine.index.query_list(&Filters {
+            status: Some(bead::Status::Open),
+            ..Default::default()
+        });
+        for b in &siblings {
+            if b.id != target.id && b.parent.as_deref() == Some(parent) {
+                related.push(serde_json::json!({
+                    "id": b.id,
+                    "title": b.title,
+                    "relationship": "same-parent",
+                    "strength": 0.9,
+                }));
+            }
+        }
+    }
+
+    // 2. Shared labels
+    if !target.labels.is_empty() {
+        for label in &target.labels {
+            let matches = engine.index.query_list(&Filters {
+                label: Some(label.clone()),
+                ..Default::default()
+            });
+            for b in &matches {
+                if b.id != target.id && !related.iter().any(|r| r["id"].as_str() == Some(&b.id)) {
+                    related.push(serde_json::json!({
+                        "id": b.id,
+                        "title": b.title,
+                        "relationship": format!("shared-label:{}", label),
+                        "strength": 0.7,
+                    }));
+                }
+            }
+        }
+    }
+
+    // 3. Dependency relationships
+    let all_open = engine.index.query_list(&Filters {
+        status: Some(bead::Status::Open),
+        ..Default::default()
+    });
+    for b in &all_open {
+        if b.id != target.id && !related.iter().any(|r| r["id"].as_str() == Some(&b.id)) {
+            if b.dependencies.contains(&target.id) {
+                related.push(serde_json::json!({
+                    "id": b.id,
+                    "title": b.title,
+                    "relationship": "blocked-by-target",
+                    "strength": 0.8,
+                }));
+            } else if target.dependencies.contains(&b.id) {
+                related.push(serde_json::json!({
+                    "id": b.id,
+                    "title": b.title,
+                    "relationship": "blocks-target",
+                    "strength": 0.8,
+                }));
+            }
+        }
+    }
+
+    // 4. Title keyword overlap (weak signal)
+    let keywords: Vec<&str> = target.title.split_whitespace()
+        .filter(|w| w.len() > 3)
+        .collect();
+    if !keywords.is_empty() {
+        for kw in &keywords {
+            let matches = engine.index.query_search(kw);
+            for b in &matches {
+                if b.id != target.id
+                    && !related.iter().any(|r| r["id"].as_str() == Some(&b.id))
+                    && (b.status == bead::Status::Open || b.status == bead::Status::InProgress)
+                {
+                    related.push(serde_json::json!({
+                        "id": b.id,
+                        "title": b.title,
+                        "relationship": "keyword-overlap",
+                        "strength": 0.4,
+                    }));
+                }
+            }
+        }
+    }
+
+    let total_related = related.len();
+
+    Ok(Some(serde_json::json!({
+        "target_bead_id": target.id,
+        "related": related,
+        "total_related": total_related,
+    })))
+}
+
+fn cmd_plan(engine: &Engine) -> Result<Option<serde_json::Value>, CliError> {
+    // Get all open/in_progress beads
+    let all = engine.index.query_list(&Filters::default());
+    let open: Vec<&bead::Bead> = all
+        .iter()
+        .filter(|b| b.status == bead::Status::Open || b.status == bead::Status::InProgress)
+        .collect();
+
+    // Group by parent epic
+    let mut tracks: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    let mut no_parent: Vec<serde_json::Value> = Vec::new();
+
+    for b in &open {
+        let item = serde_json::json!({
+            "id": b.id,
+            "title": b.title,
+            "priority": b.priority,
+            "status": b.status.as_str(),
+            "unblocks": find_unblocks(&b.id, &all),
+        });
+
+        if let Some(ref parent) = b.parent {
+            tracks.entry(parent.clone()).or_default().push(item);
+        } else {
+            no_parent.push(item);
+        }
+    }
+
+    // Build track list, sorted by lowest priority item in track
+    let mut track_list: Vec<serde_json::Value> = tracks
+        .into_iter()
+        .map(|(epic, mut items)| {
+            items.sort_by_key(|i| i["priority"].as_u64().unwrap_or(99));
+            serde_json::json!({
+                "track_id": epic,
+                "items": items,
+                "reason": format!("children of {}", epic),
+            })
+        })
+        .collect();
+
+    if !no_parent.is_empty() {
+        no_parent.sort_by_key(|i| i["priority"].as_u64().unwrap_or(99));
+        track_list.push(serde_json::json!({
+            "track_id": "_ungrouped",
+            "items": no_parent,
+            "reason": "beads without parent epic",
+        }));
+    }
+
+    track_list.sort_by_key(|t| {
+        t["items"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|i| i["priority"].as_u64())
+            .unwrap_or(99)
+    });
+
+    // Count blocked
+    let blocked_count = open
+        .iter()
+        .filter(|b| !b.dependencies.is_empty() && b.dependencies.iter().any(|dep| {
+            all.iter().any(|d| d.id == *dep && d.status != bead::Status::Closed)
+        }))
+        .count();
+
+    let total_actionable = open.len() - blocked_count;
+
+    // Find highest impact — the bead that unblocks the most others
+    let mut best_id = String::new();
+    let mut best_unblocks = 0usize;
+    for b in &open {
+        let count = find_unblocks(&b.id, &all).len();
+        if count > best_unblocks {
+            best_unblocks = count;
+            best_id = b.id.clone();
+        }
+    }
+    if best_id.is_empty() {
+        // Fall back to highest priority open bead
+        if let Some(b) = open.iter().min_by_key(|b| b.priority) {
+            best_id = b.id.clone();
+        }
+    }
+
+    Ok(Some(serde_json::json!({
+        "plan": {
+            "tracks": track_list,
+            "total_actionable": total_actionable,
+            "total_blocked": blocked_count,
+            "summary": {
+                "highest_impact": best_id,
+                "impact_reason": if best_unblocks > 0 {
+                    format!("unblocks {} other beads", best_unblocks)
+                } else {
+                    "highest priority open bead".to_string()
+                },
+                "unblocks_count": best_unblocks,
+            }
+        }
+    })))
+}
+
+/// Find bead IDs that the given bead_id unblocks (i.e., beads that depend on it).
+fn find_unblocks(bead_id: &str, all: &[bead::Bead]) -> Vec<String> {
+    all.iter()
+        .filter(|b| b.dependencies.contains(&bead_id.to_string()))
+        .map(|b| b.id.clone())
+        .collect()
+}
+
 fn cmd_doctor(db: Option<&std::path::Path>) -> Result<Option<serde_json::Value>, CliError> {
     let beads_dir = resolve_dir(db);
     let log_path = beads_dir.join("events.jsonl");
@@ -1014,6 +1329,84 @@ fn cmd_doctor(db: Option<&std::path::Path>) -> Result<Option<serde_json::Value>,
     }
 
     Ok(Some(serde_json::to_value(&diag).map_err(|e| CliError::Engine(e.to_string()))?))
+}
+
+fn cmd_health(db: Option<&std::path::Path>) -> Result<Option<serde_json::Value>, CliError> {
+    let beads_dir = resolve_dir(db);
+    let log_path = beads_dir.join("events.jsonl");
+    let db_path = beads_dir.join("index.db");
+
+    let diag = doctor::diagnose(&log_path, &db_path);
+
+    let healthy = diag.jsonl_invalid_lines == 0
+        && !diag.truncated_last_line
+        && !diag.index_watermark_stale
+        && (diag.sqlite_integrity == "ok" || diag.sqlite_integrity == "no_db")
+        && diag.stale_claims.is_empty();
+
+    Ok(Some(serde_json::json!({
+        "healthy": healthy,
+        "jsonl_lines": diag.jsonl_lines,
+        "jsonl_valid_lines": diag.jsonl_valid_lines,
+        "jsonl_invalid_lines": diag.jsonl_invalid_lines,
+        "truncated_last_line": diag.truncated_last_line,
+        "index_watermark_stale": diag.index_watermark_stale,
+        "sqlite_integrity": diag.sqlite_integrity,
+        "stale_claims": diag.stale_claims.len(),
+        "snapshot_count": diag.snapshot_count,
+    })))
+}
+
+fn cmd_backup(db: Option<&std::path::Path>) -> Result<Option<serde_json::Value>, CliError> {
+    let beads_dir = resolve_dir(db);
+    let log_path = beads_dir.join("events.jsonl");
+    let snap_dir = beads_dir.join("snapshots");
+
+    if !log_path.exists() {
+        return Err(CliError::Engine("no events.jsonl to back up".into()));
+    }
+
+    std::fs::create_dir_all(&snap_dir)?;
+    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let dest = snap_dir.join(format!("events.{ts}.jsonl"));
+    std::fs::copy(&log_path, &dest)?;
+
+    Ok(Some(serde_json::json!({
+        "action": "backup",
+        "file": dest.display().to_string(),
+    })))
+}
+
+fn cmd_restore(db: Option<&std::path::Path>, args: &RestoreArgs) -> Result<Option<serde_json::Value>, CliError> {
+    let beads_dir = resolve_dir(db);
+    let log_path = beads_dir.join("events.jsonl");
+
+    if !args.file.exists() {
+        return Err(CliError::Engine(format!("backup file not found: {}", args.file.display())));
+    }
+
+    if log_path.exists() && !args.force {
+        return Err(CliError::Engine(
+            "events.jsonl already exists — use --force to overwrite".into(),
+        ));
+    }
+
+    std::fs::copy(&args.file, &log_path)?;
+
+    // Delete stale index so it rebuilds on next read
+    let db_path = beads_dir.join("index.db");
+    if db_path.exists() {
+        let _ = std::fs::remove_file(&db_path);
+    }
+    let wm_path = beads_dir.join("index.watermark");
+    if wm_path.exists() {
+        let _ = std::fs::remove_file(&wm_path);
+    }
+
+    Ok(Some(serde_json::json!({
+        "action": "restore",
+        "from": args.file.display().to_string(),
+    })))
 }
 
 fn cmd_rebuild(db: Option<&std::path::Path>) -> Result<Option<serde_json::Value>, CliError> {
@@ -1309,6 +1702,41 @@ pub fn format_human(cmd: &Commands, value: &serde_json::Value) {
                     }
                 }
             }
+        }
+        Commands::Triage(_) => {
+            if let Some(obj) = value.as_object() {
+                let query = obj.get("query").and_then(|v| v.as_str()).unwrap_or("?");
+                let total = obj.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                println!("triage: {} results for {:?}", total, query);
+                if let Some(results) = obj.get("results").and_then(|v| v.as_array()) {
+                    for r in results {
+                        let id = r["id"].as_str().unwrap_or("?");
+                        let title = r["title"].as_str().unwrap_or("?");
+                        let priority = r["priority"].as_u64().unwrap_or(2);
+                        let score = r["score"].as_f64().unwrap_or(0.0);
+                        println!("  {} [P{}] ({:.1}) {}", id, priority, score, title);
+                    }
+                }
+            }
+        }
+        Commands::Related(_) => {
+            if let Some(obj) = value.as_object() {
+                let target = obj.get("target_bead_id").and_then(|v| v.as_str()).unwrap_or("?");
+                let total = obj.get("total_related").and_then(|v| v.as_u64()).unwrap_or(0);
+                println!("related to {}: {} beads", target, total);
+                if let Some(items) = obj.get("related").and_then(|v| v.as_array()) {
+                    for r in items {
+                        let id = r["id"].as_str().unwrap_or("?");
+                        let title = r["title"].as_str().unwrap_or("?");
+                        let rel = r["relationship"].as_str().unwrap_or("?");
+                        println!("  {} [{}] {}", id, rel, title);
+                    }
+                }
+            }
+        }
+        Commands::Plan(_) => {
+            // Pretty-print the plan
+            println!("{}", serde_json::to_string_pretty(value).unwrap_or_default());
         }
         Commands::List(_) | Commands::Ready(_) | Commands::Search(_) | Commands::City(_) => {
             if let Some(arr) = value.as_array() {
