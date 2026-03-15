@@ -2147,7 +2147,7 @@ mod tests {
                 assert_eq!(args.bead_type, BeadType::Bug);
                 assert_eq!(args.project.as_deref(), Some("relay"));
             }
-            _ => panic!("expected Create command"),
+            other => assert!(false, "expected Create command, got {other:?}"),
         }
     }
 
@@ -2171,7 +2171,7 @@ mod tests {
                 assert_eq!(args.assignee.as_deref(), Some("nobody"));
                 assert!(args.silent);
             }
-            _ => panic!("expected Create command"),
+            other => assert!(false, "expected Create command, got {other:?}"),
         }
     }
 
@@ -2187,7 +2187,7 @@ mod tests {
                 assert_eq!(args.status, Some(BeadStatus::Open));
                 assert_eq!(args.priority, Some(0));
             }
-            _ => panic!("expected List command"),
+            other => assert!(false, "expected List command, got {other:?}"),
         }
     }
 
@@ -2199,7 +2199,7 @@ mod tests {
                 assert!(args.all);
                 assert_eq!(args.status, Some(BeadStatus::Closed));
             }
-            _ => panic!("expected List command"),
+            other => assert!(false, "expected List command, got {other:?}"),
         }
     }
 
@@ -2228,7 +2228,7 @@ mod tests {
                 assert_eq!(args.sort, SearchSort::Created);
                 assert!(args.reverse);
             }
-            _ => panic!("expected Search command"),
+            other => assert!(false, "expected Search command, got {other:?}"),
         }
     }
 
@@ -2240,7 +2240,7 @@ mod tests {
                 assert_eq!(args.id, "pol-abc1");
                 assert_eq!(args.lock_for, "2h");
             }
-            _ => panic!("expected Claim command"),
+            other => assert!(false, "expected Claim command, got {other:?}"),
         }
     }
 
@@ -2252,7 +2252,7 @@ mod tests {
                 assert_eq!(args.id, "pol-abc1");
                 assert_eq!(args.reason, "Fixed in commit abc");
             }
-            _ => panic!("expected Close command"),
+            other => assert!(false, "expected Close command, got {other:?}"),
         }
     }
 
@@ -2263,7 +2263,7 @@ mod tests {
             Commands::City(args) => {
                 assert!(matches!(args.command, CityCommands::Ready));
             }
-            _ => panic!("expected City command"),
+            other => assert!(false, "expected City command, got {other:?}"),
         }
     }
 
@@ -2280,7 +2280,7 @@ mod tests {
                 assert_eq!(args.rm_dep, vec!["pol-old3"]);
                 assert_eq!(args.status, Some(BeadStatus::InProgress));
             }
-            _ => panic!("expected Update command"),
+            other => assert!(false, "expected Update command, got {other:?}"),
         }
     }
 
@@ -2302,7 +2302,7 @@ mod tests {
                 assert!(args.snapshot);
                 assert!(!args.import_only);
             }
-            _ => panic!("expected Sync command"),
+            other => assert!(false, "expected Sync command, got {other:?}"),
         }
     }
 

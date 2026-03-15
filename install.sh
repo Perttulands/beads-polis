@@ -46,7 +46,7 @@ CHECKSUM="${CHECKSUM:-}"
 CHECKSUM_URL="${CHECKSUM_URL:-}"
 ARTIFACT_URL="${ARTIFACT_URL:-}"
 LOCK_FILE="/tmp/br-install.lock"
-SYSTEM=0
+## SYSTEM flag removed — was set but never read
 NO_GUM=0
 SKIP_SKILLS=0
 MAX_RETRIES=3
@@ -422,7 +422,7 @@ while [ $# -gt 0 ]; do
         --version=*) VERSION="${1#*=}"; shift;;
         --dest) DEST="$2"; shift 2;;
         --dest=*) DEST="${1#*=}"; shift;;
-        --system) SYSTEM=1; DEST="/usr/local/bin"; shift;;
+        --system) DEST="/usr/local/bin"; shift;;
         --easy-mode) EASY=1; shift;;
         --verify) VERIFY=1; shift;;
         --artifact-url) ARTIFACT_URL="$2"; shift 2;;
@@ -722,13 +722,13 @@ install_skills() {
             if download_file "$url" "$tmp_file"; then
                 mv "$tmp_file" "$claude_dest"
                 # Make scripts executable
-                [[ "$file" == scripts/* ]] && chmod +x "$claude_dest" 2>/dev/null || true # REASON: chmod may fail on restrictive fs; non-script files skip via &&
+                if [[ "$file" == scripts/* ]]; then chmod +x "$claude_dest" 2>/dev/null || true; fi
                 log_debug "Downloaded $file to Claude skills"
                 files_installed=$((files_installed + 1))
 
                 # Copy to Codex skills
                 cp "$claude_dest" "$codex_dest" 2>/dev/null || true # REASON: codex dir may not exist; codex skill install is best-effort
-                [[ "$file" == scripts/* ]] && chmod +x "$codex_dest" 2>/dev/null || true # REASON: codex dest may not exist; best-effort
+                if [[ "$file" == scripts/* ]]; then chmod +x "$codex_dest" 2>/dev/null || true; fi
             else
                 rm -f "$tmp_file" 2>/dev/null || true # REASON: tmp file may already be gone; cleanup is best-effort
                 log_debug "Could not download $file (may not exist)"
@@ -780,7 +780,7 @@ print_skills_summary() {
             "  $(gum style --foreground 82 '/bd-to-br-migration')" \
             "" \
             "$(gum style --foreground 214 'Codex') $(gum style --faint '(dollar command):')" \
-            "  $(gum style --foreground 82 '$bd-to-br-migration')"
+            "  $(gum style --foreground 82 "\$bd-to-br-migration")"
 
         echo ""
         gum style --foreground 245 --italic "Skills auto-trigger when agents detect bd→br migration needs"
@@ -842,6 +842,7 @@ ensure_rust() {
     export PATH="$HOME/.cargo/bin:$PATH"
 
     # Source cargo env
+    # shellcheck disable=SC1091
     [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 }
 

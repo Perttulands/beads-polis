@@ -200,15 +200,15 @@ impl Index {
         };
 
         let ids: Vec<String> = if let Some(p) = project {
-            stmt.query_map(params![p], |row| row.get(0))
-                .unwrap_or_else(|_| panic!())
-                .filter_map(|r| r.ok())
-                .collect()
+            match stmt.query_map(params![p], |row| row.get(0)) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(e) => { eprintln!("query_map error: {e}"); return Vec::new(); }
+            }
         } else {
-            stmt.query_map([], |row| row.get(0))
-                .unwrap_or_else(|_| panic!())
-                .filter_map(|r| r.ok())
-                .collect()
+            match stmt.query_map([], |row| row.get(0)) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(e) => { eprintln!("query_map error: {e}"); return Vec::new(); }
+            }
         };
 
         ids.iter().filter_map(|id| self.query_show(id)).collect()
@@ -273,11 +273,10 @@ impl Index {
         let params_ref: Vec<&dyn rusqlite::types::ToSql> =
             bind_values.iter().map(|b| b.as_ref()).collect();
 
-        let ids: Vec<String> = stmt
-            .query_map(params_ref.as_slice(), |row| row.get(0))
-            .unwrap_or_else(|_| panic!())
-            .filter_map(|r| r.ok())
-            .collect();
+        let ids: Vec<String> = match stmt.query_map(params_ref.as_slice(), |row| row.get(0)) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => { eprintln!("query_map error: {e}"); return Vec::new(); }
+        };
 
         ids.iter().filter_map(|id| self.query_show(id)).collect()
     }
@@ -329,11 +328,10 @@ impl Index {
             .conn
             .prepare("SELECT depends_on FROM dependencies WHERE bead_id = ?1")
         {
-            bead.dependencies = dep_stmt
-                .query_map(params![id], |row| row.get(0))
-                .unwrap_or_else(|_| panic!())
-                .filter_map(|r| r.ok())
-                .collect();
+            bead.dependencies = match dep_stmt.query_map(params![id], |row| row.get(0)) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(_) => Vec::new(),
+            };
         }
 
         // Load labels
@@ -341,11 +339,10 @@ impl Index {
             .conn
             .prepare("SELECT label FROM labels WHERE bead_id = ?1")
         {
-            bead.labels = lbl_stmt
-                .query_map(params![id], |row| row.get(0))
-                .unwrap_or_else(|_| panic!())
-                .filter_map(|r| r.ok())
-                .collect();
+            bead.labels = match lbl_stmt.query_map(params![id], |row| row.get(0)) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(_) => Vec::new(),
+            };
         }
 
         Some(bead)
@@ -361,11 +358,10 @@ impl Index {
             Err(_) => return Vec::new(),
         };
 
-        let ids: Vec<String> = stmt
-            .query_map(params![pattern], |row| row.get(0))
-            .unwrap_or_else(|_| panic!())
-            .filter_map(|r| r.ok())
-            .collect();
+        let ids: Vec<String> = match stmt.query_map(params![pattern], |row| row.get(0)) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => { eprintln!("query_map error: {e}"); return Vec::new(); }
+        };
 
         ids.iter().filter_map(|id| self.query_show(id)).collect()
     }
@@ -491,21 +487,19 @@ fn update_blocked_cache_single(conn: &Connection, bead: &Bead) -> Result<(), rus
         let mut stmt = conn.prepare(
             "SELECT bead_id FROM dependencies WHERE depends_on = ?1",
         )?;
-        let dependent_ids: Vec<String> = stmt
-            .query_map(params![bead.id], |row| row.get(0))
-            .unwrap_or_else(|_| panic!())
-            .filter_map(|r| r.ok())
-            .collect();
+        let dependent_ids: Vec<String> = match stmt.query_map(params![bead.id], |row| row.get(0)) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        };
 
         for dep_bead_id in dependent_ids {
             let mut dep_stmt = conn.prepare(
                 "SELECT depends_on FROM dependencies WHERE bead_id = ?1",
             )?;
-            let deps: Vec<String> = dep_stmt
-                .query_map(params![dep_bead_id], |row| row.get(0))
-                .unwrap_or_else(|_| panic!())
-                .filter_map(|r| r.ok())
-                .collect();
+            let deps: Vec<String> = match dep_stmt.query_map(params![dep_bead_id], |row| row.get(0)) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(_) => Vec::new(),
+            };
 
             let mut still_blocking = Vec::new();
             for d in &deps {
