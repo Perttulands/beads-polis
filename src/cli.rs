@@ -121,7 +121,7 @@ pub enum Commands {
     Compact,
 
     /// Back up events.jsonl to a timestamped snapshot
-    Backup,
+    Backup(BackupArgs),
 
     /// Restore events.jsonl from a backup file
     Restore(RestoreArgs),
@@ -400,9 +400,21 @@ pub struct PlanArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct BackupArgs {
+    /// Destination path for the backup file (default: .beads/backups/events-YYYYMMDDTHHMMSSZ.jsonl.gz)
+    #[arg(long)]
+    pub dest: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 pub struct RestoreArgs {
     /// Path to the backup file to restore from
+    #[arg(long = "from")]
     pub file: PathBuf,
+
+    /// Validate backup integrity without restoring
+    #[arg(long)]
+    pub verify: bool,
 
     /// Overwrite current events.jsonl without confirmation
     #[arg(long, short = 'f')]
@@ -630,7 +642,7 @@ pub fn dispatch(cli: &Cli) -> Result<Option<serde_json::Value>, CliError> {
         Commands::Health => return cmd_health(db),
         Commands::Rebuild => return cmd_rebuild(db),
         Commands::Compact => return cmd_compact(db),
-        Commands::Backup => return cmd_backup(db),
+        Commands::Backup(args) => return cmd_backup(db, args),
         Commands::Restore(args) => return cmd_restore(db, args),
         _ => {}
     }
@@ -665,7 +677,7 @@ pub fn dispatch(cli: &Cli) -> Result<Option<serde_json::Value>, CliError> {
 
         // Already handled above
         Commands::Doctor | Commands::Health | Commands::Rebuild | Commands::Compact
-        | Commands::Backup | Commands::Restore(_) => unreachable!(),
+        | Commands::Backup(_) | Commands::Restore(_) => unreachable!(),
     }
 }
 
@@ -1344,46 +1356,122 @@ fn cmd_health(db: Option<&std::path::Path>) -> Result<Option<serde_json::Value>,
         && (diag.sqlite_integrity == "ok" || diag.sqlite_integrity == "no_db")
         && diag.stale_claims.is_empty();
 
+    let status = if healthy { "ok" } else { "degraded" };
+
+    if !healthy {
+        // Exit code 1 for unhealthy — return as error so main.rs exits non-zero
+        let value = serde_json::json!({
+            "status": status,
+            "events": diag.jsonl_valid_lines,
+            "watermark_stale": diag.index_watermark_stale,
+            "integrity": diag.sqlite_integrity,
+            "stale_claims": diag.stale_claims.len(),
+        });
+        // Print to stdout before exiting with error
+        println!("{}", serde_json::to_string(&value).expect("serialize"));
+        return Err(CliError::Engine("health check failed".into()));
+    }
+
     Ok(Some(serde_json::json!({
-        "healthy": healthy,
-        "jsonl_lines": diag.jsonl_lines,
-        "jsonl_valid_lines": diag.jsonl_valid_lines,
-        "jsonl_invalid_lines": diag.jsonl_invalid_lines,
-        "truncated_last_line": diag.truncated_last_line,
-        "index_watermark_stale": diag.index_watermark_stale,
-        "sqlite_integrity": diag.sqlite_integrity,
+        "status": status,
+        "events": diag.jsonl_valid_lines,
+        "watermark_stale": diag.index_watermark_stale,
+        "integrity": diag.sqlite_integrity,
         "stale_claims": diag.stale_claims.len(),
-        "snapshot_count": diag.snapshot_count,
     })))
 }
 
-fn cmd_backup(db: Option<&std::path::Path>) -> Result<Option<serde_json::Value>, CliError> {
+fn cmd_backup(db: Option<&std::path::Path>, args: &BackupArgs) -> Result<Option<serde_json::Value>, CliError> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
     let beads_dir = resolve_dir(db);
     let log_path = beads_dir.join("events.jsonl");
-    let snap_dir = beads_dir.join("snapshots");
 
     if !log_path.exists() {
         return Err(CliError::Engine("no events.jsonl to back up".into()));
     }
 
-    std::fs::create_dir_all(&snap_dir)?;
-    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let dest = snap_dir.join(format!("events.{ts}.jsonl"));
-    std::fs::copy(&log_path, &dest)?;
+    let dest = if let Some(ref d) = args.dest {
+        d.clone()
+    } else {
+        let backup_dir = beads_dir.join("backups");
+        std::fs::create_dir_all(&backup_dir)?;
+        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        backup_dir.join(format!("events-{ts}.jsonl.gz"))
+    };
+
+    // Write to .tmp then rename for atomicity
+    let tmp_dest = dest.with_extension("gz.tmp");
+    let data = std::fs::read(&log_path)?;
+    let tmp_file = std::fs::File::create(&tmp_dest)?;
+    let mut encoder = GzEncoder::new(tmp_file, Compression::default());
+    encoder.write_all(&data)?;
+    encoder.finish()?;
+    std::fs::rename(&tmp_dest, &dest)?;
 
     Ok(Some(serde_json::json!({
         "action": "backup",
         "file": dest.display().to_string(),
+        "bytes": data.len(),
     })))
 }
 
 fn cmd_restore(db: Option<&std::path::Path>, args: &RestoreArgs) -> Result<Option<serde_json::Value>, CliError> {
-    let beads_dir = resolve_dir(db);
-    let log_path = beads_dir.join("events.jsonl");
+    use flate2::read::GzDecoder;
+    use std::io::Read as _;
 
     if !args.file.exists() {
         return Err(CliError::Engine(format!("backup file not found: {}", args.file.display())));
     }
+
+    // Decompress if gzipped, otherwise read raw
+    let data = {
+        let raw = std::fs::read(&args.file)?;
+        if args.file.extension().map(|e| e == "gz").unwrap_or(false) {
+            let mut decoder = GzDecoder::new(&raw[..]);
+            let mut buf = Vec::new();
+            decoder.read_to_end(&mut buf).map_err(|e| {
+                CliError::Engine(format!("failed to decompress backup: {e}"))
+            })?;
+            buf
+        } else {
+            raw
+        }
+    };
+
+    // Validate: every line must be valid JSON with an "op" field
+    let text = String::from_utf8(data.clone()).map_err(|_| {
+        CliError::Engine("backup file is not valid UTF-8".into())
+    })?;
+    let total_lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+    let valid_lines = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter(|l| serde_json::from_str::<serde_json::Value>(l).is_ok())
+        .count();
+    let invalid_lines = total_lines - valid_lines;
+
+    if args.verify {
+        let integrity = if invalid_lines == 0 { "ok" } else { "corrupt" };
+        return Ok(Some(serde_json::json!({
+            "action": "verify",
+            "file": args.file.display().to_string(),
+            "events": valid_lines,
+            "invalid_lines": invalid_lines,
+            "integrity": integrity,
+        })));
+    }
+
+    if invalid_lines > 0 {
+        return Err(CliError::Engine(format!(
+            "backup has {invalid_lines} invalid lines — use --verify to inspect, or fix the file"
+        )));
+    }
+
+    let beads_dir = resolve_dir(db);
+    let log_path = beads_dir.join("events.jsonl");
 
     if log_path.exists() && !args.force {
         return Err(CliError::Engine(
@@ -1391,7 +1479,10 @@ fn cmd_restore(db: Option<&std::path::Path>, args: &RestoreArgs) -> Result<Optio
         ));
     }
 
-    std::fs::copy(&args.file, &log_path)?;
+    // Atomic write: tmp then rename
+    let tmp_path = log_path.with_extension("jsonl.restore-tmp");
+    std::fs::write(&tmp_path, &data)?;
+    std::fs::rename(&tmp_path, &log_path)?;
 
     // Delete stale index so it rebuilds on next read
     let db_path = beads_dir.join("index.db");
@@ -1406,6 +1497,7 @@ fn cmd_restore(db: Option<&std::path::Path>, args: &RestoreArgs) -> Result<Optio
     Ok(Some(serde_json::json!({
         "action": "restore",
         "from": args.file.display().to_string(),
+        "events": valid_lines,
     })))
 }
 
@@ -1459,13 +1551,51 @@ fn cmd_compact(db: Option<&std::path::Path>) -> Result<Option<serde_json::Value>
 fn cmd_city(engine: &Engine, args: &CityArgs) -> Result<Option<serde_json::Value>, CliError> {
     match &args.command {
         CityCommands::Ready => {
-            let beads = engine.index.query_ready(None);
-            Ok(Some(serde_json::to_value(&beads).map_err(|e| CliError::Engine(e.to_string()))?))
+            let mut all_beads = engine.index.query_ready(None);
+            // Aggregate from external project DBs
+            for (project_name, project_path) in &engine.config.projects {
+                let beads_dir = project_path.join(".beads");
+                if !beads_dir.exists() {
+                    continue;
+                }
+                if let Ok(ext_engine) = Engine::open(&beads_dir) {
+                    let mut ext_beads = ext_engine.index.query_ready(None);
+                    for b in &mut ext_beads {
+                        b.project = project_name.clone();
+                    }
+                    all_beads.extend(ext_beads);
+                }
+            }
+            // Deduplicate by ID (local wins)
+            let mut seen = std::collections::HashSet::new();
+            all_beads.retain(|b| seen.insert(b.id.clone()));
+            // Sort by priority ascending, then created_at ascending
+            all_beads.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created_at.cmp(&b.created_at)));
+            Ok(Some(serde_json::to_value(&all_beads).map_err(|e| CliError::Engine(e.to_string()))?))
         }
         CityCommands::List(list_args) => {
             let filters = list_filters(list_args);
-            let beads = engine.index.query_list(&filters);
-            Ok(Some(serde_json::to_value(&beads).map_err(|e| CliError::Engine(e.to_string()))?))
+            let mut all_beads = engine.index.query_list(&filters);
+            // Aggregate from external project DBs
+            for (project_name, project_path) in &engine.config.projects {
+                let beads_dir = project_path.join(".beads");
+                if !beads_dir.exists() {
+                    continue;
+                }
+                if let Ok(ext_engine) = Engine::open(&beads_dir) {
+                    let mut ext_beads = ext_engine.index.query_list(&filters);
+                    for b in &mut ext_beads {
+                        b.project = project_name.clone();
+                    }
+                    all_beads.extend(ext_beads);
+                }
+            }
+            // Deduplicate by ID (local wins)
+            let mut seen = std::collections::HashSet::new();
+            all_beads.retain(|b| seen.insert(b.id.clone()));
+            // Sort by priority ascending, then created_at ascending
+            all_beads.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created_at.cmp(&b.created_at)));
+            Ok(Some(serde_json::to_value(&all_beads).map_err(|e| CliError::Engine(e.to_string()))?))
         }
     }
 }
