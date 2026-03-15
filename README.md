@@ -79,8 +79,6 @@ Claim semantics: only the holder (or `operator`) can heartbeat, unclaim, or clos
 | `br restore <bundle> --verify --force` | Restore a backup bundle, always validate bundle checksums, and fail closed on post-restore integrity errors |
 | `br rebuild` | Force full index rebuild from JSONL |
 | `br compact` | Collapse event history into snapshots. Archives old log |
-| `br sync --import-only` | Rebuild index from JSONL |
-| `br sync --snapshot` | Same as compact |
 | `br sync --migrate` | Convert legacy `issues.jsonl` to event-sourced `events.jsonl` |
 | `br sync --export-project <name>` | Export project beads to its repo `.beads/` dir |
 
