@@ -13,7 +13,9 @@ fn main() {
 
     match cli::dispatch(&parsed) {
         Ok(Some(value)) => {
-            if json_mode {
+            if cli::suppress_stdout(&parsed.command) {
+                // V1 compat: suppress success output while preserving stderr errors.
+            } else if json_mode {
                 println!(
                     "{}",
                     serde_json::to_string(&value).expect("failed to serialize output")

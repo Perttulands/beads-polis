@@ -128,7 +128,12 @@ pub enum Commands {
 #[derive(Args, Debug)]
 pub struct CreateArgs {
     /// Bead title
-    pub title: String,
+    #[arg(value_name = "TITLE", required_unless_present = "title_flag")]
+    pub title: Option<String>,
+
+    /// Alias for the positional TITLE argument
+    #[arg(long = "title", value_name = "TITLE", conflicts_with = "title")]
+    pub title_flag: Option<String>,
 
     /// Priority: 0=critical, 1=high, 2=medium, 3=low, 4=backlog
     #[arg(short, long, default_value_t = 2)]
@@ -157,6 +162,18 @@ pub struct CreateArgs {
     /// Labels (repeatable)
     #[arg(short, long)]
     pub label: Vec<String>,
+
+    /// V1 compatibility alias for comma-separated labels
+    #[arg(long = "labels", value_delimiter = ',')]
+    pub labels: Vec<String>,
+
+    /// Assignee
+    #[arg(short = 'a', long)]
+    pub assignee: Option<String>,
+
+    /// Suppress stdout on success
+    #[arg(long)]
+    pub silent: bool,
 }
 
 #[derive(Args, Debug)]
@@ -167,6 +184,10 @@ pub struct ShowArgs {
 
 #[derive(Args, Debug, Default)]
 pub struct ListArgs {
+    /// V1 compatibility flag. List already shows all statuses by default.
+    #[arg(long)]
+    pub all: bool,
+
     /// Filter by project
     #[arg(long)]
     pub project: Option<String>,
@@ -247,6 +268,26 @@ pub struct ReadyArgs {
 pub struct SearchArgs {
     /// Search query (matched against title + description)
     pub query: String,
+
+    /// Max results to return
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    /// Filter by status
+    #[arg(long)]
+    pub status: Option<BeadStatus>,
+
+    /// Filter by bead type
+    #[arg(long = "type")]
+    pub bead_type: Option<String>,
+
+    /// Sort field
+    #[arg(long, value_enum, default_value_t = SearchSort::Priority)]
+    pub sort: SearchSort,
+
+    /// Reverse sort order
+    #[arg(long)]
+    pub reverse: bool,
 }
 
 #[derive(Args, Debug)]
@@ -366,6 +407,13 @@ impl std::fmt::Display for BeadType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchSort {
+    Created,
+    Updated,
+    Priority,
 }
 
 // ---------------------------------------------------------------------------
@@ -563,19 +611,20 @@ pub fn dispatch(cli: &Cli) -> Result<Option<serde_json::Value>, CliError> {
 fn cmd_create(engine: &Engine, actor: &str, args: &CreateArgs) -> Result<Option<serde_json::Value>, CliError> {
     let now = Utc::now();
     let id = engine.generate_id();
+    let title = args.resolved_title()?;
 
     let snapshot = BeadSnapshot {
         id: id.clone(),
-        title: args.title.clone(),
+        title: title.clone(),
         description: args.description.clone(),
         status: "open".into(),
         priority: args.priority.min(4),
         bead_type: args.bead_type.as_str().into(),
         project: args.project.clone().unwrap_or_default(),
-        assignee: None,
+        assignee: args.assignee.clone(),
         parent: args.parent.clone(),
         dependencies: args.deps.clone(),
-        labels: args.label.clone(),
+        labels: args.all_labels(),
         created_at: now,
         updated_at: now,
         closed_at: None,
@@ -598,7 +647,7 @@ fn cmd_create(engine: &Engine, actor: &str, args: &CreateArgs) -> Result<Option<
 
     Ok(Some(serde_json::json!({
         "id": id,
-        "title": args.title,
+        "title": title,
     })))
 }
 
@@ -718,7 +767,31 @@ fn cmd_ready(engine: &Engine, args: &ReadyArgs) -> Result<Option<serde_json::Val
 }
 
 fn cmd_search(engine: &Engine, args: &SearchArgs) -> Result<Option<serde_json::Value>, CliError> {
-    let beads = engine.index.query_search(&args.query);
+    let mut beads = engine.index.query_search(&args.query);
+
+    if let Some(status) = args.status.as_ref() {
+        let status = status.to_core();
+        beads.retain(|bead| bead.status == status);
+    }
+
+    if let Some(bead_type) = args.bead_type.as_deref() {
+        beads.retain(|bead| bead.bead_type.as_str() == bead_type);
+    }
+
+    match args.sort {
+        SearchSort::Created => beads.sort_by_key(|bead| bead.created_at),
+        SearchSort::Updated => beads.sort_by_key(|bead| bead.updated_at),
+        SearchSort::Priority => beads.sort_by_key(|bead| bead.priority),
+    }
+
+    if args.reverse {
+        beads.reverse();
+    }
+
+    if let Some(limit) = args.limit {
+        beads.truncate(limit);
+    }
+
     Ok(Some(serde_json::to_value(&beads).map_err(|e| CliError::Engine(e.to_string()))?))
 }
 
@@ -1148,6 +1221,28 @@ impl BeadType {
     }
 }
 
+impl CreateArgs {
+    fn resolved_title(&self) -> Result<String, CliError> {
+        self.title
+            .clone()
+            .or_else(|| self.title_flag.clone())
+            .ok_or_else(|| CliError::Engine("missing bead title".into()))
+    }
+
+    fn all_labels(&self) -> Vec<String> {
+        let mut labels = self.label.clone();
+        labels.extend(
+            self.labels
+                .iter()
+                .flat_map(|group| group.split(','))
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_string),
+        );
+        labels
+    }
+}
+
 /// Build Filters from ListArgs.
 fn list_filters(args: &ListArgs) -> Filters {
     Filters {
@@ -1259,6 +1354,10 @@ pub fn format_human(cmd: &Commands, value: &serde_json::Value) {
             println!("{}", serde_json::to_string_pretty(value).unwrap_or_default());
         }
     }
+}
+
+pub fn suppress_stdout(cmd: &Commands) -> bool {
+    matches!(cmd, Commands::Create(args) if args.silent)
 }
 
 fn status_icon(status: &str) -> &'static str {
@@ -1397,10 +1496,34 @@ mod tests {
         ]);
         match &cli.command {
             Commands::Create(args) => {
-                assert_eq!(args.title, "Fix relay timeout");
+                assert_eq!(args.title.as_deref(), Some("Fix relay timeout"));
                 assert_eq!(args.priority, 1);
                 assert_eq!(args.bead_type, BeadType::Bug);
                 assert_eq!(args.project.as_deref(), Some("relay"));
+            }
+            _ => panic!("expected Create command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_create_compat_flags() {
+        let cli = Cli::parse_from([
+            "br",
+            "create",
+            "--title",
+            "Compat title",
+            "--labels",
+            "foo,bar",
+            "-a",
+            "nobody",
+            "--silent",
+        ]);
+        match &cli.command {
+            Commands::Create(args) => {
+                assert_eq!(args.title_flag.as_deref(), Some("Compat title"));
+                assert_eq!(args.all_labels(), vec!["foo", "bar"]);
+                assert_eq!(args.assignee.as_deref(), Some("nobody"));
+                assert!(args.silent);
             }
             _ => panic!("expected Create command"),
         }
@@ -1419,6 +1542,47 @@ mod tests {
                 assert_eq!(args.priority, Some(0));
             }
             _ => panic!("expected List command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_list_with_all_flag() {
+        let cli = Cli::parse_from(["br", "list", "--all", "--status", "closed"]);
+        match &cli.command {
+            Commands::List(args) => {
+                assert!(args.all);
+                assert_eq!(args.status, Some(BeadStatus::Closed));
+            }
+            _ => panic!("expected List command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_search_compat_flags() {
+        let cli = Cli::parse_from([
+            "br",
+            "search",
+            "gate",
+            "--limit",
+            "5",
+            "--status",
+            "closed",
+            "--type",
+            "gate",
+            "--sort",
+            "created",
+            "--reverse",
+        ]);
+        match &cli.command {
+            Commands::Search(args) => {
+                assert_eq!(args.query, "gate");
+                assert_eq!(args.limit, Some(5));
+                assert_eq!(args.status, Some(BeadStatus::Closed));
+                assert_eq!(args.bead_type.as_deref(), Some("gate"));
+                assert_eq!(args.sort, SearchSort::Created);
+                assert!(args.reverse);
+            }
+            _ => panic!("expected Search command"),
         }
     }
 
