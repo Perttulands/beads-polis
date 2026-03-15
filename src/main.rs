@@ -28,7 +28,13 @@ fn main() {
         Ok(None) => {}
         Err(e) => {
             let exit_code = e.exit_code();
-            if json_mode || !std::io::stderr().is_terminal() {
+            if matches!(&e, cli::CliError::LintFailed(_)) {
+                // Lint results go to stdout (not stderr) for machine consumption
+                println!(
+                    "{}",
+                    serde_json::to_string(&e.to_json()).expect("failed to serialize lint result")
+                );
+            } else if json_mode || !std::io::stderr().is_terminal() {
                 eprintln!(
                     "{}",
                     serde_json::to_string(&e.to_json()).expect("failed to serialize error")

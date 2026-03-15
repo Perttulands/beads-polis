@@ -129,6 +129,9 @@ pub enum Commands {
     /// City-wide commands (cross-project)
     City(CityArgs),
 
+    /// Lint: check bead quality (title length, body, done-condition keywords)
+    Lint(LintArgs),
+
     // -- Intelligence (replaces bv) ------------------------------------------
 
     /// Triage: search beads for work dispatch (replaces bv --robot-search)
@@ -374,6 +377,16 @@ pub enum CityCommands {
 }
 
 // ---------------------------------------------------------------------------
+// Lint args
+// ---------------------------------------------------------------------------
+
+#[derive(Args, Debug)]
+pub struct LintArgs {
+    /// Bead ID to lint
+    pub id: String,
+}
+
+// ---------------------------------------------------------------------------
 // Intelligence command args (bv replacements)
 // ---------------------------------------------------------------------------
 
@@ -517,6 +530,8 @@ pub enum CliError {
     },
     /// Generic I/O error
     Io(std::io::Error),
+    /// Lint check failed — carries the result JSON for stdout output
+    LintFailed(serde_json::Value),
 }
 
 impl std::fmt::Display for CliError {
@@ -549,6 +564,10 @@ impl std::fmt::Display for CliError {
                 "index thrashing detected: {rebuilds} rebuilds in {window_secs}s"
             ),
             Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::LintFailed(v) => {
+                let errors = v["errors"].as_array().map(|a| a.len()).unwrap_or(0);
+                write!(f, "lint failed: {} error(s)", errors)
+            }
         }
     }
 }
@@ -608,6 +627,7 @@ impl CliError {
                 "error": "io",
                 "message": e.to_string(),
             }),
+            Self::LintFailed(v) => v.clone(),
         }
     }
 
@@ -622,6 +642,7 @@ impl CliError {
             Self::IndexThrashing { .. } => 3,
             Self::Engine(_) => 1,
             Self::Io(_) => 1,
+            Self::LintFailed(_) => 1,
         }
     }
 }
@@ -669,6 +690,9 @@ pub fn dispatch(cli: &Cli) -> Result<Option<serde_json::Value>, CliError> {
 
         // -- City -----------------------------------------------------------
         Commands::City(args) => cmd_city(&engine, args),
+
+        // -- Lint -----------------------------------------------------------
+        Commands::Lint(args) => cmd_lint(&engine, args),
 
         // -- Intelligence (bv replacements) ---------------------------------
         Commands::Triage(args) => cmd_triage(&engine, args),
@@ -1601,6 +1625,70 @@ fn cmd_city(engine: &Engine, args: &CityArgs) -> Result<Option<serde_json::Value
 }
 
 // ---------------------------------------------------------------------------
+// Lint — bead quality gate
+// ---------------------------------------------------------------------------
+
+const DONE_CONDITION_KEYWORDS: &[&str] = &[
+    "done when", "success:", "test:", "passes", "done:", "complete", "implemented", "fixed",
+];
+
+fn cmd_lint(engine: &Engine, args: &LintArgs) -> Result<Option<serde_json::Value>, CliError> {
+    let bead = engine
+        .index
+        .query_show(&args.id)
+        .ok_or_else(|| CliError::NotFound(args.id.clone()))?;
+
+    let mut errors: Vec<String> = Vec::new();
+
+    // Check title length (>= 10 chars)
+    if bead.title.len() < 10 {
+        errors.push(format!(
+            "title too short: {} chars (minimum 10)",
+            bead.title.len()
+        ));
+    }
+
+    // Check description present and >= 20 chars
+    match &bead.description {
+        Some(desc) if !desc.trim().is_empty() => {
+            if desc.len() < 20 {
+                errors.push(format!(
+                    "description too short: {} chars (minimum 20)",
+                    desc.len()
+                ));
+            }
+        }
+        _ => {
+            errors.push("description/body is missing".to_string());
+        }
+    }
+
+    // Check for done-condition keywords in description
+    let has_done_keyword = bead.description.as_deref().map_or(false, |desc| {
+        let lower = desc.to_lowercase();
+        DONE_CONDITION_KEYWORDS.iter().any(|kw| lower.contains(kw))
+    });
+    if !has_done_keyword {
+        errors.push(format!(
+            "no done-condition keyword found (expected one of: {})",
+            DONE_CONDITION_KEYWORDS.join(", ")
+        ));
+    }
+
+    let passed = errors.is_empty();
+    let result = serde_json::json!({
+        "passed": passed,
+        "errors": errors,
+    });
+
+    if passed {
+        Ok(Some(result))
+    } else {
+        Err(CliError::LintFailed(result))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Legacy migration: issues.jsonl → events.jsonl
 // ---------------------------------------------------------------------------
 
@@ -2247,7 +2335,7 @@ mod tests {
         let help = Cli::command().render_help().to_string();
         for cmd in [
             "create", "show", "list", "update", "close", "ready", "search", "sync",
-            "claim", "heartbeat", "unclaim", "doctor", "rebuild", "compact", "city",
+            "claim", "heartbeat", "unclaim", "doctor", "rebuild", "compact", "city", "lint",
         ] {
             assert!(help.contains(cmd), "help missing command: {cmd}");
         }
