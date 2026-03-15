@@ -305,7 +305,7 @@ Things this system explicitly does not need:
 
 1. Replace the current `br` binary (v0.1.19, frankensqlite) with upstream v0.1.14 (rusqlite).
 2. Rebuild the SQLite index from JSONL: `br sync --import-only`.
-3. Verify: `sqlite3 .beads/beads.db "PRAGMA integrity_check"` returns `ok`.
+3. Verify: `sqlite3 .beads/index.db "PRAGMA integrity_check"` returns `ok`.
 4. Verify: all existing commands work (`create`, `close`, `list`, `ready`, `show`, `update`, `dep`, `search`).
 5. Run the system for 24 hours. Confirm zero corruption incidents.
 
@@ -352,7 +352,7 @@ Things this system explicitly does not need:
 The beads system is done when:
 
 1. **Zero corruption incidents in 30 days of multi-agent operation.**
-2. **`sqlite3 beads.db "PRAGMA integrity_check"` always returns `ok`** — the database is readable by standard SQLite tools, not just by `br`.
+2. **`sqlite3 index.db "PRAGMA integrity_check"` always returns `ok`** — the database is readable by standard SQLite tools, not just by `br`.
 3. **Any agent can recover from any failure without human help.** Corrupt index? Auto-rebuilt. Stale claim? Auto-released. Truncated JSONL line? Auto-discarded.
 4. **`br ready` returns results in <200ms** even after days of continuous agent writes.
 5. **The WAL file never exceeds 1MB.** Checkpointing works.
