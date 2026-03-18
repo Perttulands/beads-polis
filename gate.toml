@@ -1,0 +1,7 @@
+[check]
+# beads-polis root is ~1950MB (Rust target/ build artifacts) and UBS refuses
+# to scan dirs > 1000MB. The .ubsignore has target/ but UBS checks size
+# before reading ignores. Point gate at src/ where actual source lives.
+# gate standard level uses ubs_diff; deep level uses ubs.
+ubs = ["--format=json", "src/"]
+ubs_diff = ["--format=json", "src/"]
