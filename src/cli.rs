@@ -13,7 +13,7 @@ use crate::index::Filters;
 use chrono::{Duration, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Top-level CLI
@@ -73,6 +73,10 @@ pub enum Commands {
 
     /// Create a new bead
     Create(CreateArgs),
+
+    /// Create a bead with aggressive defaults for informal work
+    #[command(visible_alias = "q")]
+    Quick(CreateArgs),
 
     /// Show full details of a bead
     Show(ShowArgs),
@@ -675,6 +679,7 @@ pub fn dispatch(cli: &Cli) -> Result<Option<serde_json::Value>, CliError> {
     match &cli.command {
         // -- Core commands ---------------------------------------------------
         Commands::Create(args) => cmd_create(&engine, &actor, args),
+        Commands::Quick(args) => cmd_quick(&engine, &actor, args),
         Commands::Show(args) => cmd_show(&engine, args),
         Commands::List(args) => cmd_list(&engine, args),
         Commands::Update(args) => cmd_update(&engine, &actor, args),
@@ -710,6 +715,20 @@ pub fn dispatch(cli: &Cli) -> Result<Option<serde_json::Value>, CliError> {
 // ---------------------------------------------------------------------------
 
 fn cmd_create(engine: &Engine, actor: &str, args: &CreateArgs) -> Result<Option<serde_json::Value>, CliError> {
+    cmd_create_with_project(engine, actor, args, args.project.clone())
+}
+
+fn cmd_quick(engine: &Engine, actor: &str, args: &CreateArgs) -> Result<Option<serde_json::Value>, CliError> {
+    let project = args.project.clone().or_else(|| infer_quick_project(engine));
+    cmd_create_with_project(engine, actor, args, project)
+}
+
+fn cmd_create_with_project(
+    engine: &Engine,
+    actor: &str,
+    args: &CreateArgs,
+    project: Option<String>,
+) -> Result<Option<serde_json::Value>, CliError> {
     let now = Utc::now();
     let id = engine.generate_id();
     let title = args.resolved_title()?;
@@ -721,7 +740,7 @@ fn cmd_create(engine: &Engine, actor: &str, args: &CreateArgs) -> Result<Option<
         status: "open".into(),
         priority: args.priority.min(4),
         bead_type: args.bead_type.as_str().into(),
-        project: args.project.clone().unwrap_or_default(),
+        project: project.unwrap_or_default(),
         assignee: args.assignee.clone(),
         parent: args.parent.clone(),
         dependencies: args.deps.clone(),
@@ -750,6 +769,58 @@ fn cmd_create(engine: &Engine, actor: &str, args: &CreateArgs) -> Result<Option<
         "id": id,
         "title": title,
     })))
+}
+
+fn infer_quick_project(engine: &Engine) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    infer_project_name(&cwd, &engine.beads_dir, &engine.config)
+}
+
+fn infer_project_name(cwd: &Path, beads_dir: &Path, config: &config::Config) -> Option<String> {
+    infer_project_from_config(cwd, &config.projects)
+        .or_else(|| infer_project_from_beads_root(cwd, beads_dir))
+        .or_else(|| infer_project_from_polis_layout(cwd))
+}
+
+fn infer_project_from_config(cwd: &Path, projects: &HashMap<String, PathBuf>) -> Option<String> {
+    projects
+        .iter()
+        .filter(|(_, path)| cwd.starts_with(path))
+        .max_by_key(|(_, path)| path.components().count())
+        .map(|(name, _)| name.clone())
+}
+
+fn infer_project_from_beads_root(cwd: &Path, beads_dir: &Path) -> Option<String> {
+    let root = beads_dir.parent()?;
+    let rel = cwd.strip_prefix(root).ok()?;
+    project_from_relative_path(rel)
+}
+
+fn infer_project_from_polis_layout(cwd: &Path) -> Option<String> {
+    let components = normal_path_components(cwd);
+    let idx = components
+        .iter()
+        .position(|component| component == "tools" || component == "projects")?;
+    components.get(idx + 1).cloned()
+}
+
+fn project_from_relative_path(path: &Path) -> Option<String> {
+    let components = normal_path_components(path);
+    match components.as_slice() {
+        [] => None,
+        [first, ..] if first == ".beads" => None,
+        [first, second, ..] if first == "tools" || first == "projects" => Some(second.clone()),
+        [first, ..] => Some(first.clone()),
+    }
+}
+
+fn normal_path_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn cmd_show(engine: &Engine, args: &ShowArgs) -> Result<Option<serde_json::Value>, CliError> {
@@ -1392,7 +1463,9 @@ fn cmd_health(db: Option<&std::path::Path>) -> Result<Option<serde_json::Value>,
             "stale_claims": diag.stale_claims.len(),
         });
         // Print to stdout before exiting with error
-        println!("{}", serde_json::to_string(&value).expect("serialize"));
+        let health_json = serde_json::to_string(&value)
+            .map_err(|e| CliError::Engine(format!("failed to serialize health check output: {e}")))?;
+        println!("{health_json}");
         return Err(CliError::Engine("health check failed".into()));
     }
 
@@ -1974,7 +2047,7 @@ pub fn format_human(cmd: &Commands, value: &serde_json::Value) {
                 }
             }
         }
-        Commands::Create(_) => {
+        Commands::Create(_) | Commands::Quick(_) => {
             if let Some(obj) = value.as_object() {
                 let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                 let title = obj.get("title").and_then(|v| v.as_str()).unwrap_or("?");
@@ -2003,7 +2076,7 @@ pub fn format_human(cmd: &Commands, value: &serde_json::Value) {
 }
 
 pub fn suppress_stdout(cmd: &Commands) -> bool {
-    matches!(cmd, Commands::Create(args) if args.silent)
+    matches!(cmd, Commands::Create(args) | Commands::Quick(args) if args.silent)
 }
 
 fn status_icon(status: &str) -> &'static str {
@@ -2107,7 +2180,9 @@ impl ThrashTracker {
 /// Called by the rebuild handler after each successful rebuild.
 /// Returns Err with alert if thrashing is detected.
 pub fn record_rebuild_event(json_mode: bool) -> Result<(), CliError> {
-    let mut guard = REBUILD_TRACKER.lock().unwrap();
+    let mut guard = REBUILD_TRACKER
+        .lock()
+        .map_err(|e| CliError::Engine(format!("failed to acquire rebuild tracker lock: {e}")))?;
     let tracker = guard.get_or_insert_with(ThrashTracker::new);
 
     if let Some(count) = tracker.record_rebuild() {
@@ -2173,6 +2248,46 @@ mod tests {
             }
             other => assert!(false, "expected Create command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_quick() {
+        let cli = Cli::parse_from(["br", "quick", "Fix gate README typo", "--silent"]);
+        match &cli.command {
+            Commands::Quick(args) => {
+                assert_eq!(args.title.as_deref(), Some("Fix gate README typo"));
+                assert!(args.silent);
+            }
+            other => assert!(false, "expected Quick command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn infer_project_prefers_beads_root_relative_path() {
+        let config = config::Config {
+            issue_prefix: "pol".into(),
+            projects: HashMap::new(),
+        };
+        let beads_dir = PathBuf::from("/tmp/polis/.beads");
+        let cwd = PathBuf::from("/tmp/polis/gate/docs");
+        assert_eq!(
+            infer_project_name(&cwd, &beads_dir, &config),
+            Some("gate".into())
+        );
+    }
+
+    #[test]
+    fn infer_project_handles_polis_tools_layout() {
+        let config = config::Config {
+            issue_prefix: "pol".into(),
+            projects: HashMap::new(),
+        };
+        let beads_dir = PathBuf::from("/tmp/fallback/.beads");
+        let cwd = PathBuf::from("/home/polis/tools/work");
+        assert_eq!(
+            infer_project_name(&cwd, &beads_dir, &config),
+            Some("work".into())
+        );
     }
 
     #[test]
@@ -2334,7 +2449,7 @@ mod tests {
     fn help_text_includes_all_commands() {
         let help = Cli::command().render_help().to_string();
         for cmd in [
-            "create", "show", "list", "update", "close", "ready", "search", "sync",
+            "create", "quick", "show", "list", "update", "close", "ready", "search", "sync",
             "claim", "heartbeat", "unclaim", "doctor", "rebuild", "compact", "city", "lint",
         ] {
             assert!(help.contains(cmd), "help missing command: {cmd}");
