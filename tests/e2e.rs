@@ -27,6 +27,14 @@ fn run_json(cmd: &mut Command) -> serde_json::Value {
     })
 }
 
+fn br_at(beads_dir: &std::path::Path) -> Command {
+    let bin = env!("CARGO_BIN_EXE_br");
+    let mut cmd = Command::new(bin);
+    cmd.env("POLIS_ACTOR", "e2e-test");
+    cmd.env("BEADS_DIR", beads_dir.to_str().unwrap());
+    cmd
+}
+
 // ---------------------------------------------------------------------------
 // CRUD lifecycle
 // ---------------------------------------------------------------------------
@@ -69,6 +77,23 @@ fn e2e_create_show_list_close() {
     // List open should be empty
     let val = run_json(br(&tmp).args(["list", "--status", "open"]));
     assert_eq!(val.as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn e2e_quick_infers_project_from_context() {
+    let tmp = TempDir::new().unwrap();
+    let beads_dir = tmp.path().join(".beads");
+    let project_dir = tmp.path().join("gate").join("docs");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let mut quick = br_at(&beads_dir);
+    quick.current_dir(&project_dir);
+    let val = run_json(quick.args(["quick", "Fix README typo"]));
+    let id = val["id"].as_str().unwrap().to_string();
+
+    let val = run_json(br_at(&beads_dir).args(["show", &id]));
+    assert_eq!(val["project"], "gate");
+    assert_eq!(val["title"], "Fix README typo");
 }
 
 // ---------------------------------------------------------------------------

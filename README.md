@@ -8,11 +8,11 @@ Event-sourced work tracker for multi-agent AI operations.
 
 ## What Changed
 
-This was originally a fork of [beads_rust](https://github.com/Dicklesworthstone/beads_rust) by Jeffrey Emanuel. The upstream project switched to `frankensqlite` (a from-scratch SQLite reimplementation) in v0.1.15, which produced corrupt databases under concurrent access. Rather than continuing to patch around that, we rewrote the storage layer from scratch.
+This was originally a fork of the upstream `br` tracker by Jeffrey Emanuel. The upstream project switched to `frankensqlite` (a from-scratch SQLite reimplementation) in v0.1.15, which produced corrupt databases under concurrent access. Rather than continuing to patch around that, we rewrote the storage layer from scratch.
 
 **beads-polis** keeps the `br` CLI interface and JSONL data format but replaces the entire storage architecture:
 
-| | Old (beads_rust fork) | New (beads-polis) |
+| | Old (upstream fork) | New (beads-polis) |
 |---|---|---|
 | Write path | SQLite primary, JSONL export | JSONL append-only (source of truth) |
 | Read path | SQLite queries | SQLite derived index, auto-rebuilt |
@@ -39,6 +39,7 @@ Requires: Rust 2021 edition, Linux (POSIX flock).
 export POLIS_ACTOR=your-name    # Required for all write operations
 
 br create "Fix relay timeout" -p 1 -t bug --project relay
+br quick "Fix gate README typo"  # infers project from cwd when possible
 br list --status open
 br ready                        # Unblocked, actionable work
 br show pol-abc1
@@ -52,6 +53,7 @@ br close pol-abc1 --reason "Fixed in commit def456"
 | Command | Description |
 |---------|-------------|
 | `br create <title>` | Create a bead. Flags: `-p` priority, `-t` type, `--project`, `--dep`, `--parent`, `-l` label, `--description` |
+| `br quick <title>` | Fast create for informal work. Same flags as `create`, but infers `--project` from cwd or Polis layout when omitted |
 | `br show <id>` | Full bead details |
 | `br list` | List beads. Flags: `--status`, `--project`, `--priority`, `-t` type |
 | `br update <id>` | Update fields. Flags: `--title`, `--priority`, `--status`, `--add-dep`, `--rm-dep`, `--project`, `--assignee` |
@@ -183,12 +185,12 @@ Test coverage includes:
 
 ## History
 
-- **beads_rust** by Jeffrey Emanuel — original SQLite-primary tracker
+- **Upstream `br` tracker** by Jeffrey Emanuel — original SQLite-primary tracker
 - **beads-polis fork** — added POSIX flock for concurrent writes
 - **v0.1.14** — last upstream version with real SQLite (before frankensqlite)
 - **beads-polis** (this) — event-sourced rewrite, JSONL-first, 3,300 lines
 
 ## Attribution
 
-Original `beads_rust` by Jeffrey Emanuel. Licensed under MIT.
+Original upstream tracker by Jeffrey Emanuel. Licensed under MIT.
 Rewrite by Polis agents (opus1, codex1) for Polis multi-agent operations.
